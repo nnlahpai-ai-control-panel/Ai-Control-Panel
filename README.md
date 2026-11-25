@@ -45,6 +45,20 @@ Running the installer again upgrades in place and keeps your login, apps, models
 * llama-server exposes an OpenAI-compatible API at `http://127.0.0.1:8081/v1`. Open WebUI is pre-wired to both Ollama and llama.cpp.
 * Docker apps that use a GPU (ComfyUI, Immich ML, Jellyfin) get NVIDIA (CUDA) *or* AMD (ROCm) passthrough. You choose which in the install dialog, because container images are vendor-specific.
 
+### How many GPUs can be pooled?
+
+| | |
+|---|---|
+| **Recommended** | **2 to 6 GPUs** (works best, easy to power and cool) |
+| Software limit | about 15 mixed GPUs (llama.cpp Vulkan supports 16 devices, and 1 backend slot goes to the CPU) |
+| Real limit | your motherboard slots and PCIe lanes, power supply and cooling |
+
+Tips for a good pool:
+* Any count and any sizes work, for example 8+12+16GB, 6+24GB or 4x16GB. The panel detects each server's cards and splits by its real VRAM.
+* With the default **layer** split, the cards take turns, so x1 risers are fine. But the **slowest card sets the speed**. A small old card adds VRAM and can make generation slower, so only add it if you need the memory.
+* Each card draws 150 to 450W. Size the power supply for all cards at full load plus 20%.
+* Above 6 cards, expect more setup trouble (BIOS "Above 4G decoding" and "Resizable BAR", riser stability) and smaller speed gains per card.
+
 ## Getting models and apps in
 
 * **Ollama:** 1-click library, or type any name (`qwen3:14b`, `hf.co/user/repo`). You can also turn any local GGUF into an Ollama model with the "→ Ollama" button.

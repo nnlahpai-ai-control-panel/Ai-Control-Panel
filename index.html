@@ -465,6 +465,13 @@ async function loadLlama() {
      <div class="text-xs text-accent-400 mt-1">gets ~${tot ? Math.round(d.total_mb / tot * 100) : 0}% of layers</div></div>`).join('')
     || `<p class="text-sm text-slate-500">${s.installed ? 'No Vulkan GPUs found by llama.cpp. Check drivers with: vulkaninfo --summary' : 'Re-run install_app.sh to install llama.cpp.'}</p>`;
   if (s.auto_split) $('#lTs').placeholder = `auto = ${s.auto_split}`;
+  if (s.devices.length) {
+    const sizes = s.devices.map(d => d.total_mb), small = Math.min(...sizes), big = Math.max(...sizes);
+    let tip = `${s.devices.length} GPU${s.devices.length > 1 ? 's' : ''} pooled = ${(tot / 1024).toFixed(0)} GB. Recommended: 2 to 6 GPUs.`;
+    if (s.devices.length > 6) tip += ' More than 6 works (limit about 15), but each extra card adds less speed and more setup trouble.';
+    if (s.devices.length > 1 && small < big / 3) tip += ' Tip: a much smaller card can slow generation. Use Devices to leave it out if you don\'t need its VRAM.';
+    $('#llamaDevices').insertAdjacentHTML('beforeend', `<p class="text-xs text-slate-400 sm:col-span-2 lg:col-span-3">${esc(tip)}</p>`);
+  }
   const models = await api('/api/llama/models').catch(() => []);
   $('#lModel').innerHTML = '<option value="">— choose a GGUF —</option>' + models.map(m => `<option value="${esc(m.name)}" ${m.name === c.model ? 'selected' : ''}>${esc(m.name)} (${gb(m.size)} GB${m.shards > 1 ? `, ${m.shards} parts` : ''})</option>`).join('');
   $('#lCtx').value = c.ctx; $('#lNgl').value = c.ngl; $('#lSplit').value = c.split_mode; $('#lTs').value = c.tensor_split;
