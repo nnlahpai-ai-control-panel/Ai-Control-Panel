@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AI Server Control Panel</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>">
+
 <!-- All assets are served locally from /static so the panel works on offline LANs -->
 <link rel="stylesheet" href="/static/tailwind.css">
 <link rel="stylesheet" href="/static/xterm.css">
@@ -33,7 +33,7 @@
 </style>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
 <meta name="theme-color" content="#0b1220">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -53,7 +53,7 @@
 <div id="login" class="hidden min-h-screen flex items-center justify-center p-4">
   <form id="loginForm" class="card p-8 w-full max-w-sm space-y-4">
     <div class="text-center">
-      <div class="text-5xl">🧠</div>
+      <img src="/icon.svg" alt="" class="w-16 h-16 mx-auto">
       <h1 class="text-2xl font-bold mt-2">AI Server Control</h1>
       <p class="text-slate-400 text-sm">Sign in to manage your server</p>
     </div>
@@ -69,7 +69,7 @@
   <header class="sticky top-0 z-30 bg-ink-950/90 backdrop-blur border-b border-ink-800">
     <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
       <div class="flex items-center gap-2 mr-4 min-w-0">
-        <span class="text-2xl">🧠</span>
+        <img src="/icon.svg" alt="" class="w-9 h-9 shrink-0">
         <div>
           <div class="font-bold leading-tight">AI Server Control</div>
           <div id="hostname" class="text-xs text-slate-500"></div>

@@ -229,7 +229,7 @@ if [[ -f "$SCRIPT_DIR/app.py" && -f "$SCRIPT_DIR/index.html" && -d "$SCRIPT_DIR/
   fi
 elif [[ -n "$SOURCE_URL" ]]; then
   mkdir -p "$PANEL_HOME/static"
-  for f in "${FILES[@]}" install_app.sh static/tailwind.css static/xterm.css static/xterm.js static/addon-fit.js; do curl -fsSL "$SOURCE_URL/$f" -o "$PANEL_HOME/$f.new" && mv "$PANEL_HOME/$f.new" "$PANEL_HOME/$f"; done
+  for f in "${FILES[@]}" install_app.sh static/tailwind.css static/xterm.css static/xterm.js static/addon-fit.js static/icon-180.png static/icon-192.png static/icon-512.png; do curl -fsSL "$SOURCE_URL/$f" -o "$PANEL_HOME/$f.new" && mv "$PANEL_HOME/$f.new" "$PANEL_HOME/$f"; done
 else
   die "app.py not found next to this script. Run it from the folder with the panel files, or pass --source URL"
 fi

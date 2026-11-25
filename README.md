@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🧠 AI Server Control Panel
+<img src="docs/brand/icon.svg" width="120" alt="AI Control Panel logo">
+
+# AI Server Control Panel
 
 ### Every GPU you own. One AI server. One browser tab.
 
