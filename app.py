@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"
@@ -499,7 +499,6 @@ def pool_vk_env(pool_id: str) -> dict[str, str]:
     return {"GGML_VK_VISIBLE_DEVICES": ",".join(str(i) for i in sorted(idx))}
 
 
-_last_net = {"t": time.time(), "rx": 0, "tx": 0}
 
 
 # --------------------------------------------------------------------------------------
@@ -583,34 +582,301 @@ async def ollama_pool(body: PoolPick):
     return {"ok": rc == 0, "message": "Ollama restarted" if rc == 0 else out}
 
 
+# --------------------------------------------------------------------------------------
+# System monitor: background sampler (5 s) feeds live rates + 1 hour of history
+# --------------------------------------------------------------------------------------
+HISTORY_POINTS = 720  # 720 x 5 s = 1 hour
+HISTORY: list[dict] = []
+LIVE: dict = {"net": {}, "disk": {}, "gpus": [], "t": 0}
+_prev: dict = {}
+VIRTUAL_NICS = re.compile(r"^(lo|docker\d*|br-|veth|virbr|tailscale|zt|cni|flannel|vnet|ifb|tun|tap|wg)")
+
+
+def _sample() -> None:
+    now = time.time()
+    dt = max(now - _prev.get("t", now - 5), 0.5)
+    nics = psutil.net_io_counters(pernic=True)
+    disks = psutil.disk_io_counters(perdisk=True) or {}
+    net, dsk = {}, {}
+    for name, c in nics.items():
+        p = _prev.get("nic", {}).get(name)
+        net[name] = {"rx_bps": (c.bytes_recv - p.bytes_recv) / dt if p else 0,
+                     "tx_bps": (c.bytes_sent - p.bytes_sent) / dt if p else 0,
+                     "rx_total": c.bytes_recv, "tx_total": c.bytes_sent}
+    for name, c in disks.items():
+        p = _prev.get("disk", {}).get(name)
+        dsk[name] = {"read_bps": (c.read_bytes - p.read_bytes) / dt if p else 0,
+                     "write_bps": (c.write_bytes - p.write_bytes) / dt if p else 0,
+                     "busy": min(100.0, (getattr(c, "busy_time", 0) - getattr(p, "busy_time", 0)) / (dt * 10)) if p and hasattr(c, "busy_time") else None}
+    _prev.update(t=now, nic=nics, disk=disks)
+    gpus = all_gpus()
+    LIVE.update(net=net, disk=dsk, gpus=gpus, t=now)
+    phys_net = {k: v for k, v in net.items() if not VIRTUAL_NICS.match(k)}
+    whole = {k: v for k, v in dsk.items() if _is_whole_disk(k)}
+    vm = psutil.virtual_memory()
+    HISTORY.append({
+        "t": int(now),
+        "cpu": psutil.cpu_percent(interval=None),
+        "ram": vm.percent,
+        "cpu_temp": cpu_temp(),
+        "rx": sum(v["rx_bps"] for v in phys_net.values()),
+        "tx": sum(v["tx_bps"] for v in phys_net.values()),
+        "dr": sum(v["read_bps"] for v in whole.values()),
+        "dw": sum(v["write_bps"] for v in whole.values()),
+        "gpu": [g.get("util") for g in gpus],
+        "vram": [round(100 * (g["vram_used_mb"] or 0) / g["vram_total_mb"], 1) if g.get("vram_total_mb") else None for g in gpus],
+        "gtemp": [g.get("temp") for g in gpus],
+    })
+    if len(HISTORY) > HISTORY_POINTS:
+        del HISTORY[:len(HISTORY) - HISTORY_POINTS]
+
+
+def _is_whole_disk(name: str) -> bool:
+    return os.path.exists(f"/sys/block/{name}") and not name.startswith(("loop", "ram", "zram", "dm-", "sr"))
+
+
+async def sampler_loop() -> None:
+    psutil.cpu_percent(interval=None)
+    while True:
+        try:
+            await asyncio.to_thread(_sample)
+        except Exception as e:  # never let monitoring kill the panel
+            print("sampler:", e, file=sys.stderr)
+        await asyncio.sleep(5)
+
+
+@app.on_event("startup")
+async def _start_sampler():
+    asyncio.create_task(sampler_loop())
+
+
+def cpu_temp() -> Optional[float]:
+    try:
+        temps = psutil.sensors_temperatures()
+    except Exception:
+        return None
+    for chip in ("coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz"):
+        sensors = temps.get(chip, [])
+        # prefer the package / die sensor (Intel "Package id 0", AMD "Tctl"/"Tdie")
+        best = [t for t in sensors if (t.label or "").startswith(("Package", "Tctl", "Tdie"))] or sensors
+        for t in best:
+            if t.current:
+                return round(t.current, 1)
+    return None
+
+
+def fans() -> list[dict]:
+    try:
+        return [{"name": f"{chip} {f.label or i}".strip(), "rpm": f.current}
+                for chip, lst in psutil.sensors_fans().items() for i, f in enumerate(lst) if f.current]
+    except Exception:
+        return []
+
+
 @app.get("/api/stats")
 async def stats():
-    gpus = await asyncio.to_thread(all_gpus)
+    if not LIVE["t"]:
+        await asyncio.to_thread(_sample)
+    gpus = [dict(g) for g in LIVE["gpus"]]
     pools = load_config().get("pools", {})
     for g in gpus:
         g["pools"] = [p.get("name", pid) for pid, p in pools.items() if g["bus"] in p.get("gpus", [])]
     total = sum(g["vram_total_mb"] or 0 for g in gpus)
     used = sum(g["vram_used_mb"] or 0 for g in gpus)
     vm = psutil.virtual_memory()
+    sw = psutil.swap_memory()
     du = psutil.disk_usage("/")
-    n = psutil.net_io_counters()
-    now = time.time()
-    dt = max(now - _last_net["t"], 0.5)
-    rx = (n.bytes_recv - _last_net["rx"]) / dt if _last_net["rx"] else 0
-    tx = (n.bytes_sent - _last_net["tx"]) / dt if _last_net["tx"] else 0
-    _last_net.update(t=now, rx=n.bytes_recv, tx=n.bytes_sent)
-    load = os.getloadavg()
+    last = HISTORY[-1] if HISTORY else {}
     return {
         "gpus": gpus,
         "pool": {"total_mb": total, "used_mb": used, "count": len(gpus)},
-        "cpu": {"percent": psutil.cpu_percent(interval=None), "cores": psutil.cpu_count(), "load": load,
-                "model": _cpu_model()},
-        "ram": {"total": vm.total, "used": vm.total - vm.available, "percent": vm.percent},
-        "disk": {"total": du.total, "used": du.used, "percent": du.percent},
-        "net": {"rx_bps": rx, "tx_bps": tx},
-        "uptime": int(now - psutil.boot_time()),
+        "cpu": {"percent": last.get("cpu", psutil.cpu_percent(interval=None)), "cores": psutil.cpu_count(),
+                "load": os.getloadavg(), "model": _cpu_model(), "temp": cpu_temp(),
+                "freq": round(psutil.cpu_freq().current) if psutil.cpu_freq() else None},
+        "ram": {"total": vm.total, "used": vm.total - vm.available, "percent": vm.percent,
+                "cached": getattr(vm, "cached", 0), "swap_total": sw.total, "swap_used": sw.used, "swap_percent": sw.percent},
+        "disk": {"total": du.total, "used": du.used, "percent": du.percent,
+                 "read_bps": last.get("dr", 0), "write_bps": last.get("dw", 0)},
+        "net": {"rx_bps": last.get("rx", 0), "tx_bps": last.get("tx", 0)},
+        "fans": fans(),
+        "uptime": int(time.time() - psutil.boot_time()),
         "hostname": socket.gethostname(),
     }
+
+
+@app.get("/api/history")
+async def history(points: int = 360):
+    return {"interval": 5, "points": HISTORY[-max(10, min(points, HISTORY_POINTS)):]}
+
+
+@app.get("/api/network")
+async def network():
+    addrs = psutil.net_if_addrs()
+    st = psutil.net_if_stats()
+    out = []
+    for name, v in sorted(LIVE["net"].items()):
+        s_ = st.get(name)
+        ips = [a.address for a in addrs.get(name, []) if a.family == socket.AF_INET]
+        mac = next((a.address for a in addrs.get(name, []) if a.family == psutil.AF_LINK), "")
+        out.append({"name": name, "virtual": bool(VIRTUAL_NICS.match(name)), "up": bool(s_ and s_.isup),
+                    "speed_mbps": s_.speed if s_ else 0, "ips": ips, "mac": mac, **v})
+    return out
+
+
+# ---- hardware inventory (auto-detected, cached 10 min) --------------------------------
+_hw_cache: dict = {"t": 0, "data": None}
+
+
+def _dmi(k: str) -> str:
+    v = _read(f"/sys/class/dmi/id/{k}") or ""
+    return "" if v.lower() in ("default string", "to be filled by o.e.m.", "not specified", "system product name") else v
+
+
+def ram_modules() -> list[dict]:
+    if not shutil.which("dmidecode"):
+        return []
+    rc, out = run_quick(["dmidecode", "-t", "17"], timeout=10)
+    mods = []
+    for block in out.split("\n\n"):
+        if "Memory Device" not in block:
+            continue
+        f = dict(re.findall(r"^\s*([A-Za-z ]+):\s*(.+)$", block, re.M))
+        size = f.get("Size", "")
+        if not size or "No Module" in size or size.startswith("Unknown"):
+            continue
+        mods.append({"slot": f.get("Locator", ""), "size": size, "type": f.get("Type", ""),
+                     "speed": f.get("Configured Memory Speed") or f.get("Speed", ""),
+                     "maker": f.get("Manufacturer", ""), "part": (f.get("Part Number") or "").strip()})
+    return mods
+
+
+PCI_GROUPS = [("GPU", r"VGA|3D|Display"), ("Network", r"Ethernet|Network|Wireless"),
+              ("Storage", r"SATA|NVM|RAID|SAS|Mass storage|Non-Volatile"), ("USB", r"USB"), ("Audio", r"Audio")]
+
+
+def pci_devices() -> dict[str, list[str]]:
+    rc, out = run_quick(["lspci", "-mm"], timeout=10)
+    groups: dict[str, list[str]] = {}
+    for line in out.splitlines():
+        parts = re.findall(r'"([^"]*)"', line)
+        if len(parts) < 3:
+            continue
+        cls, vendor, dev = parts[0], parts[1], parts[2]
+        for g, rx in PCI_GROUPS:
+            if re.search(rx, cls, re.I):
+                groups.setdefault(g, []).append(f"{vendor} {dev}".strip())
+                break
+    return groups
+
+
+@app.get("/api/hardware")
+async def hardware(refresh: bool = False):
+    if _hw_cache["data"] and not refresh and time.time() - _hw_cache["t"] < 600:
+        return _hw_cache["data"]
+
+    def collect():
+        f = psutil.cpu_freq()
+        mods = ram_modules()
+        os_name = (_read("/etc/os-release") or "").split('PRETTY_NAME="')[-1].split('"')[0]
+        return {
+            "system": " ".join(x for x in (_dmi("sys_vendor"), _dmi("product_name")) if x),
+            "board": " ".join(x for x in (_dmi("board_vendor"), _dmi("board_name")) if x),
+            "bios": " ".join(x for x in (_dmi("bios_vendor"), _dmi("bios_version"), _dmi("bios_date")) if x),
+            "cpu": {"model": _cpu_model(), "cores": psutil.cpu_count(logical=False), "threads": psutil.cpu_count(),
+                    "max_mhz": round(f.max) if f and f.max else None},
+            "ram_total": psutil.virtual_memory().total, "ram_modules": mods,
+            "pci": pci_devices(), "os": os_name, "kernel": os.uname().release,
+        }
+    data = await asyncio.to_thread(collect)
+    _hw_cache.update(t=time.time(), data=data)
+    return data
+
+
+# ---- disks: HDD / SSD / NVMe, usage, live speed, SMART health -------------------------
+_smart_cache: dict[str, tuple[float, dict]] = {}
+
+
+def smart_info(dev: str) -> dict:
+    hit = _smart_cache.get(dev)
+    if hit and time.time() - hit[0] < 300:
+        return hit[1]
+    info: dict = {}
+    if shutil.which("smartctl"):
+        rc, out = run_quick(["smartctl", "-j", "-H", "-A", "-i", f"/dev/{dev}"], timeout=20)
+        try:
+            j = json.loads(out)
+            info["available"] = True
+            if "smart_status" in j:
+                info["healthy"] = bool(j["smart_status"].get("passed"))
+            info["temp"] = (j.get("temperature") or {}).get("current")
+            info["power_on_hours"] = (j.get("power_on_time") or {}).get("hours")
+            nv = j.get("nvme_smart_health_information_log") or {}
+            if nv:
+                info["wear_percent"] = nv.get("percentage_used")
+                info["media_errors"] = nv.get("media_errors")
+                info["written_tb"] = round(nv.get("data_units_written", 0) * 512000 / 1e12, 2)
+            for a in (j.get("ata_smart_attributes") or {}).get("table", []):
+                if a.get("id") == 5:
+                    info["reallocated"] = a.get("raw", {}).get("value")
+                elif a.get("id") == 197:
+                    info["pending"] = a.get("raw", {}).get("value")
+                elif a.get("id") in (177, 231, 233) and "wear_percent" not in info:
+                    v = a.get("value")
+                    if a.get("id") == 177 and v is not None:
+                        info["wear_percent"] = max(0, 100 - v)
+                elif a.get("id") == 241:
+                    raw = a.get("raw", {}).get("value") or 0
+                    info["written_tb"] = round(raw * 512 / 1e12, 2)
+        except Exception:
+            info = {"available": False}
+    else:
+        info = {"available": False, "reason": "smartmontools not installed"}
+    _smart_cache[dev] = (time.time(), info)
+    return info
+
+
+@app.get("/api/disks")
+async def disks():
+    rc, out = run_quick(["lsblk", "-J", "-b", "-o", "NAME,TYPE,SIZE,ROTA,TRAN,MODEL,SERIAL,MOUNTPOINTS,FSTYPE,LABEL"], timeout=10)
+    try:
+        tree = json.loads(out).get("blockdevices", [])
+    except Exception:
+        tree = []
+    result = []
+
+    def mounts_of(node, acc):
+        for mp in node.get("mountpoints") or []:
+            if mp and not mp.startswith("/snap") and mp != "[SWAP]":
+                try:
+                    u = psutil.disk_usage(mp)
+                    acc.append({"mount": mp, "fs": node.get("fstype"), "label": node.get("label"),
+                                "total": u.total, "used": u.used, "percent": u.percent, "part": node["name"]})
+                except Exception:
+                    pass
+        for ch in node.get("children") or []:
+            mounts_of(ch, acc)
+        return acc
+
+    for d in tree:
+        if d.get("type") != "disk" or d["name"].startswith(("loop", "zram", "ram", "sr")):
+            continue
+        tran = (d.get("tran") or "").lower()
+        kind = "NVMe" if tran == "nvme" or d["name"].startswith("nvme") else ("HDD" if d.get("rota") in (True, "1", 1) else "SSD")
+        if tran == "usb":
+            kind += " (USB)"
+        smart = await asyncio.to_thread(smart_info, d["name"])
+        io = LIVE["disk"].get(d["name"], {})
+        # one row per partition: bind mounts (e.g. /var/lib/docker on /) show the shortest path only
+        per_part: dict[str, dict] = {}
+        for m in mounts_of(d, []):
+            cur = per_part.get(m["part"])
+            if not cur or len(m["mount"]) < len(cur["mount"]):
+                per_part[m["part"]] = m
+        result.append({"name": d["name"], "model": (d.get("model") or "").strip(), "serial": d.get("serial"),
+                       "size": int(d.get("size") or 0), "type": kind, "mounts": sorted(per_part.values(), key=lambda m: m["mount"]),
+                       "read_bps": io.get("read_bps", 0), "write_bps": io.get("write_bps", 0), "busy": io.get("busy"),
+                       "smart": smart})
+    return result
 
 
 _cpu_name = None

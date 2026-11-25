@@ -161,6 +161,7 @@ log "Installing base packages"
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip curl ca-certificates gnupg jq unzip git \
   pciutils lsb-release vulkan-tools libvulkan1 mesa-vulkan-drivers libgomp1 >/dev/null
+apt-get install -y -qq --no-install-recommends smartmontools lm-sensors dmidecode >/dev/null || warn "smartmontools not installed (disk health will be hidden)"
 ok "Base packages"
 detect_gpus
 

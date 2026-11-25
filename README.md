@@ -2,6 +2,24 @@
 
 A self-contained web panel for an existing Ubuntu Server 24.04 / 26.04. It manages local AI models, Docker apps, multi-GPU telemetry and a browser terminal, all on **port 1234**. It does not change the kernel and needs no custom ISO. It runs as systemd services under `/opt/ai-panel`.
 
+It works the same on **Ubuntu Desktop** 24.04 / 26.04. The panel runs in the background, and you open it in any browser, on the machine itself (http://localhost:1234) or from another device.
+
+## System monitor (all detected automatically)
+
+The **GPU & System** tab finds every piece of hardware on its own. Nothing needs to be configured, and new drives, cards or network ports show up automatically.
+
+| Section | What it shows |
+|---|---|
+| GPUs | Each card's name, VRAM, utilization, temperature and power, plus the combined VRAM pool |
+| CPU / RAM | Usage, CPU temperature and clock, RAM and swap |
+| History charts | The last 5 min, 30 min or 1 hour of CPU, RAM, temperatures, GPU load and VRAM, network and drive speed |
+| Hardware | Motherboard, BIOS, CPU cores, each RAM stick (size, type, speed, slot), and the PCI cards (GPUs, network, storage controllers) |
+| Drives | Every HDD, SSD and NVMe drive with its type, size, partitions and usage, live read/write speed and busy %, plus **SMART health** (healthy or failing), temperature, power-on days, SSD wear %, TB written, and warnings for bad sectors |
+| Network | Every port with its IP, link speed, live in/out speed and totals. Docker and VPN interfaces are hidden unless you tick "show". |
+| Fans | Fan RPM where the motherboard reports it |
+
+Drive health uses `smartmontools`, and RAM stick details use `dmidecode`. The installer adds both. For even deeper monitoring with alerts, install **Netdata** or **Uptime Kuma** from the App Store.
+
 ## Files
 
 | File | What it is |

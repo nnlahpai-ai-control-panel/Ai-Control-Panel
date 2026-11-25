@@ -93,6 +93,30 @@
       <div id="gpuCards" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></div>
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" id="sysCards"></div>
       <div class="card p-5">
+        <div class="flex justify-between items-center mb-3 flex-wrap gap-2">
+          <h2 class="text-lg font-bold">History</h2>
+          <div class="flex gap-1" id="histRange">
+            <button class="btn btn-g !py-1" data-pts="60">5 min</button><button class="btn btn-p !py-1" data-pts="360">30 min</button><button class="btn btn-g !py-1" data-pts="720">1 hour</button>
+          </div>
+        </div>
+        <div id="charts" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></div>
+      </div>
+      <div class="card p-5">
+        <div class="flex justify-between items-center mb-3"><h2 class="text-lg font-bold">Hardware</h2><button id="hwRefresh" class="btn btn-g !py-1">Rescan</button></div>
+        <div id="hwInfo" class="grid gap-4 md:grid-cols-2 text-sm"></div>
+      </div>
+      <div class="card p-5">
+        <h2 class="text-lg font-bold mb-3">Drives (HDD / SSD / NVMe)</h2>
+        <div id="diskCards" class="grid gap-4 md:grid-cols-2"></div>
+      </div>
+      <div class="card p-5">
+        <div class="flex justify-between items-center mb-2 flex-wrap gap-2">
+          <h2 class="text-lg font-bold">Network</h2>
+          <label class="text-sm text-slate-400 flex items-center gap-2"><input type="checkbox" id="showVirt" class="accent-sky-500"> Show Docker / virtual interfaces</label>
+        </div>
+        <div id="netTable" class="overflow-x-auto"></div>
+      </div>
+      <div class="card p-5">
         <div class="flex flex-wrap justify-between items-center gap-2">
           <div>
             <h2 class="text-lg font-bold">GPU pools</h2>
@@ -326,7 +350,7 @@ function showTab(t) {
   currentTab = t; history.replaceState(null, '', '#' + t);
   $$('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
   $$('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + t));
-  if (t === 'dash') { loadStats(); loadPools(); }
+  if (t === 'dash') { loadStats(); loadPools(); loadDisks(); loadNet(); loadHistory(); loadHardware(); }
   if (t === 'models') { loadPoolOptions(); loadOllama(); loadLlama(); }
   if (t === 'apps') loadApps();
   if (t === 'term') openTerminal();
@@ -342,7 +366,12 @@ $$('[data-sub]').forEach(b => b.onclick = () => {
 let pollTimer = null, taskTimer = null;
 function startPolling() {
   stopPolling();
-  pollTimer = setInterval(() => { if (currentTab === 'dash' && !document.hidden) loadStats(); }, 2000);
+  let tick = 0;
+  pollTimer = setInterval(() => {
+    if (currentTab !== 'dash' || document.hidden) return;
+    loadStats(); tick++;
+    if (tick % 3 === 0) { loadDisks(); loadNet(); loadHistory(); }
+  }, 2000);
   taskTimer = setInterval(pollTasks, 1500);
 }
 function stopPolling() { clearInterval(pollTimer); clearInterval(taskTimer); }
@@ -374,10 +403,96 @@ async function loadStats() {
     </div>`;
   }).join('') || `<div class="card p-6 text-slate-400 sm:col-span-2 lg:col-span-3">No GPU telemetry. For NVIDIA, check <code>nvidia-smi</code> works; AMD cards are read from the amdgpu driver.</div>`;
   const sc = (t, v, p, sub) => `<div class="card p-4"><div class="text-slate-400 text-sm">${t}</div><div class="text-xl font-bold mt-1">${v}</div>${p != null ? `<div class="bar mt-2"><div class="${usageColor(p)}" style="width:${p}%"></div></div>` : ''}<div class="text-xs text-slate-500 mt-1 truncate">${sub || ''}</div></div>`;
-  $('#sysCards').innerHTML = sc('CPU', s.cpu.percent.toFixed(0) + '%', s.cpu.percent, `${s.cpu.cores} threads · ${esc(s.cpu.model)}`)
-    + sc('RAM', `${gb(s.ram.used)} / ${gb(s.ram.total)} GB`, s.ram.percent)
-    + sc('Disk /', `${gb(s.disk.used)} / ${gb(s.disk.total)} GB`, s.disk.percent)
-    + sc('Network', `↓ ${fmtBytes(s.net.rx_bps)}/s`, null, `↑ ${fmtBytes(s.net.tx_bps)}/s`);
+  const tc = t => t == null ? '' : `<span class="${t > 85 ? 'text-red-400' : t > 70 ? 'text-amber-400' : 'text-slate-300'}">${Math.round(t)}°C</span>`;
+  $('#sysCards').innerHTML = sc(`CPU ${tc(s.cpu.temp)}`, s.cpu.percent.toFixed(0) + '%' + (s.cpu.freq ? ` <span class="text-sm text-slate-500">${(s.cpu.freq / 1000).toFixed(1)} GHz</span>` : ''), s.cpu.percent, `${s.cpu.cores} threads · ${esc(s.cpu.model)}`)
+    + sc('RAM', `${gb(s.ram.used)} / ${gb(s.ram.total)} GB`, s.ram.percent, s.ram.swap_total ? `Swap ${gb(s.ram.swap_used)} / ${gb(s.ram.swap_total)} GB` : 'No swap')
+    + sc('System drive /', `${gb(s.disk.used)} / ${gb(s.disk.total)} GB`, s.disk.percent, `All drives: read ${fmtBytes(s.disk.read_bps)}/s · write ${fmtBytes(s.disk.write_bps)}/s`)
+    + sc('Network', `↓ ${fmtBytes(s.net.rx_bps)}/s`, null, `↑ ${fmtBytes(s.net.tx_bps)}/s` + (s.fans.length ? ' · Fans ' + s.fans.slice(0, 3).map(f => f.rpm + ' rpm').join(', ') : ''));
+}
+
+// ===================================================================== history charts (inline SVG)
+const CHART_COLORS = ['#38bdf8', '#a78bfa', '#f472b6', '#34d399', '#fbbf24', '#fb7185', '#60a5fa', '#c084fc'];
+let histPoints = 360;
+$$('#histRange button').forEach(b => b.onclick = () => {
+  histPoints = +b.dataset.pts; $$('#histRange button').forEach(x => { x.classList.toggle('btn-p', x === b); x.classList.toggle('btn-g', x !== b); }); loadHistory();
+});
+function chartSvg(series, { max = null, fmt = v => v.toFixed(0) } = {}) {
+  const W = 300, H = 90, all = series.flatMap(s => s.data.filter(v => v != null));
+  const top = max ?? Math.max(1, ...all) * 1.1;
+  const n = Math.max(2, ...series.map(s => s.data.length));
+  const lines = series.map((s, i) => {
+    const pts = s.data.map((v, j) => v == null ? null : `${(j / (n - 1) * W).toFixed(1)},${(H - Math.min(v, top) / top * H).toFixed(1)}`).filter(Boolean).join(' ');
+    const col = s.color || CHART_COLORS[i % CHART_COLORS.length];
+    return `<polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+  }).join('');
+  const grid = [0.25, 0.5, 0.75].map(f => `<line x1="0" x2="${W}" y1="${H * f}" y2="${H * f}" stroke="#1f2a3d" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('');
+  const legend = series.map((s, i) => { const last = [...s.data].reverse().find(v => v != null); return `<span class="whitespace-nowrap"><span style="color:${s.color || CHART_COLORS[i % CHART_COLORS.length]}">●</span> ${esc(s.name)} <b class="text-slate-200">${last != null ? fmt(last) : '–'}</b></span>`; }).join(' ');
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="w-full h-24 bg-ink-950 rounded-lg">${grid}${lines}</svg>
+    <div class="flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-400 mt-1">${legend}<span class="ml-auto text-slate-600">max ${fmt(top / (max ? 1 : 1.1))}</span></div>`;
+}
+async function loadHistory() {
+  let h; try { h = await api('/api/history?points=' + histPoints); } catch { return; }
+  const P = h.points; if (!P.length) { $('#charts').innerHTML = '<p class="text-sm text-slate-500">Collecting data... charts appear after a few seconds.</p>'; return; }
+  const col = k => P.map(p => p[k]);
+  const nG = Math.max(0, ...P.map(p => (p.gpu || []).length));
+  const per = (k, label) => Array.from({ length: nG }, (_, i) => ({ name: `${label}${i}`, data: P.map(p => (p[k] || [])[i] ?? null) }));
+  const rate = v => fmtBytes(v) + '/s';
+  const box = (title, svg) => `<div><div class="text-sm text-slate-400 mb-1">${title}</div>${svg}</div>`;
+  $('#charts').innerHTML =
+    box('CPU %', chartSvg([{ name: 'CPU', data: col('cpu') }], { max: 100 })) +
+    box('RAM %', chartSvg([{ name: 'RAM', data: col('ram'), color: '#34d399' }], { max: 100 })) +
+    box('Temperatures °C', chartSvg([{ name: 'CPU', data: col('cpu_temp'), color: '#fbbf24' }, ...per('gtemp', 'GPU')], { max: 100 })) +
+    (nG ? box('GPU utilization %', chartSvg(per('gpu', 'GPU'), { max: 100 })) + box('GPU VRAM used %', chartSvg(per('vram', 'GPU'), { max: 100 })) : '') +
+    box('Network', chartSvg([{ name: '↓ in', data: col('rx') }, { name: '↑ out', data: col('tx'), color: '#f472b6' }], { fmt: rate })) +
+    box('Drives', chartSvg([{ name: 'read', data: col('dr'), color: '#60a5fa' }, { name: 'write', data: col('dw'), color: '#fb7185' }], { fmt: rate }));
+}
+
+// ===================================================================== hardware
+async function loadHardware(refresh = false) {
+  let h; try { h = await api('/api/hardware' + (refresh ? '?refresh=true' : '')); } catch { return; }
+  const row = (k, v) => v ? `<div class="flex gap-3 py-1 border-b border-ink-800"><span class="text-slate-400 w-24 shrink-0">${k}</span><span class="min-w-0">${v}</span></div>` : '';
+  const ram = h.ram_modules.length ? h.ram_modules.map(m => `${esc(m.size)} ${esc(m.type)} ${esc(m.speed)} <span class="text-slate-500">${esc(m.slot)} · ${esc(m.maker)} ${esc(m.part)}</span>`).join('<br>') : '';
+  const pci = Object.entries(h.pci).map(([g, l]) => row(g, l.map(esc).join('<br>'))).join('');
+  $('#hwInfo').innerHTML = `<div>${row('System', esc(h.system))}${row('Motherboard', esc(h.board))}${row('BIOS', esc(h.bios))}
+      ${row('CPU', `${esc(h.cpu.model)}<br><span class="text-slate-500">${h.cpu.cores} cores / ${h.cpu.threads} threads${h.cpu.max_mhz ? ' · up to ' + (h.cpu.max_mhz / 1000).toFixed(1) + ' GHz' : ''}</span>`)}
+      ${row('RAM', `${gb(h.ram_total)} GB total${ram ? '<br>' + ram : ''}`)}${row('OS', `${esc(h.os)}<br><span class="text-slate-500">kernel ${esc(h.kernel)}</span>`)}</div>
+    <div>${pci || '<p class="text-slate-500">No PCI info (lspci missing).</p>'}</div>`;
+}
+$('#hwRefresh').onclick = () => loadHardware(true);
+
+// ===================================================================== drives
+async function loadDisks() {
+  let d; try { d = await api('/api/disks'); } catch { return; }
+  const typeCol = { HDD: 'bg-amber-900 text-amber-200', SSD: 'bg-sky-900 text-sky-200', NVMe: 'bg-violet-900 text-violet-200' };
+  $('#diskCards').innerHTML = d.map(x => {
+    const sm = x.smart || {};
+    const health = sm.healthy === true ? '<span class="pill bg-green-900 text-green-300">Healthy</span>' : sm.healthy === false ? '<span class="pill bg-red-900 text-red-200">FAILING - back up now</span>' : '<span class="pill bg-ink-700 text-slate-400" title="' + esc(sm.reason || 'SMART not available for this drive') + '">Health n/a</span>';
+    const warn = (sm.reallocated > 0 || sm.pending > 0 || sm.media_errors > 0) ? `<div class="text-xs text-amber-400 mt-1">⚠ ${sm.reallocated ? sm.reallocated + ' reallocated sectors ' : ''}${sm.pending ? sm.pending + ' pending sectors ' : ''}${sm.media_errors ? sm.media_errors + ' media errors' : ''}</div>` : '';
+    const facts = [sm.temp != null ? `${sm.temp}°C` : null, sm.power_on_hours != null ? `${Math.round(sm.power_on_hours / 24)} days on` : null, sm.wear_percent != null ? `${sm.wear_percent}% worn` : null, sm.written_tb ? `${sm.written_tb} TB written` : null].filter(Boolean).join(' · ');
+    return `<div class="bg-ink-850 border border-ink-800 rounded-xl p-4">
+      <div class="flex justify-between gap-2 items-start">
+        <div class="min-w-0"><div class="font-semibold truncate">${esc(x.model || x.name)}</div>
+        <div class="text-xs text-slate-500">/dev/${esc(x.name)} · ${gb(x.size)} GB${x.serial ? ' · ' + esc(x.serial) : ''}</div></div>
+        <div class="flex gap-1 flex-wrap justify-end"><span class="pill ${typeCol[x.type.split(' ')[0]] || 'bg-ink-700'}">${esc(x.type)}</span>${health}</div>
+      </div>
+      <div class="text-xs text-slate-400 mt-2">${facts || '&nbsp;'}</div>${warn}
+      <div class="text-xs text-slate-400 mt-1">Read ${fmtBytes(x.read_bps)}/s · Write ${fmtBytes(x.write_bps)}/s${x.busy != null ? ` · ${Math.round(x.busy)}% busy` : ''}</div>
+      ${x.mounts.map(m => `<div class="mt-2 text-sm"><div class="flex justify-between"><span class="truncate">${esc(m.mount)} <span class="text-slate-500 text-xs">${esc(m.fs || '')}</span></span><span class="text-slate-400">${gb(m.used)} / ${gb(m.total)} GB</span></div><div class="bar mt-1"><div class="${usageColor(m.percent)}" style="width:${m.percent}%"></div></div></div>`).join('') || '<div class="text-xs text-slate-500 mt-2">Not mounted</div>'}
+    </div>`;
+  }).join('') || '<p class="text-sm text-slate-500">No drives found.</p>';
+}
+
+// ===================================================================== network
+$('#showVirt').onchange = () => loadNet();
+async function loadNet() {
+  let n; try { n = await api('/api/network'); } catch { return; }
+  const rows = n.filter(i => $('#showVirt').checked || !i.virtual);
+  $('#netTable').innerHTML = `<table class="w-full text-sm"><thead><tr class="text-left text-slate-400"><th class="py-1 pr-3">Interface</th><th class="pr-3">IP</th><th class="pr-3">Link</th><th class="pr-3">↓ In</th><th class="pr-3">↑ Out</th><th>Total since boot</th></tr></thead><tbody>` +
+    rows.map(i => `<tr class="border-t border-ink-800"><td class="py-2 pr-3"><span class="${i.up ? 'text-green-400' : 'text-slate-600'}">●</span> ${esc(i.name)}</td>
+      <td class="pr-3 text-slate-300">${esc(i.ips.join(', ') || '–')}</td>
+      <td class="pr-3 text-slate-400">${i.up ? (i.speed_mbps ? (i.speed_mbps >= 1000 ? i.speed_mbps / 1000 + ' Gb/s' : i.speed_mbps + ' Mb/s') : 'up') : 'down'}</td>
+      <td class="pr-3">${fmtBytes(i.rx_bps)}/s</td><td class="pr-3">${fmtBytes(i.tx_bps)}/s</td>
+      <td class="text-slate-400">↓ ${fmtBytes(i.rx_total)} · ↑ ${fmtBytes(i.tx_total)}</td></tr>`).join('') + '</tbody></table>';
 }
 
 // ===================================================================== tasks
