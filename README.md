@@ -1,5 +1,29 @@
 # AI Server Control Panel
 
+**Turn any Ubuntu box with a pile of mismatched GPUs into a local AI server, managed from your browser.**
+
+Pool an RTX 3060 + RX 6800 + old GTX 1080 into one big VRAM pool for LLMs, install Open WebUI, ComfyUI, Immich and 25 more apps with one click, and watch every GPU, drive and fan. No SSH needed.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nnlahpai-ai-control-panel/ai-control-panel/main/install_app.sh -o install_app.sh
+sudo bash install_app.sh
+```
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+| | |
+|---|---|
+| ![AI models](docs/screenshots/llama-cpp.png) | ![App Store](docs/screenshots/app-store.png) |
+| **llama.cpp mixed-GPU pool**: NVIDIA + AMD + Intel in one model | **1-click App Store**: 28 apps with GPU passthrough |
+| ![GPU pools](docs/screenshots/gpu-pools.png) | ![Terminal](docs/screenshots/terminal.png) |
+| **GPU pools**: e.g. "AI" cards vs "Media" cards | **Browser terminal**: full root shell, no SSH |
+
+*Screenshots use demo GPU data.*
+
+**Feedback wanted!** If you try it, please [share a hardware report](../../issues/new?template=hardware_report.yml), [report a bug](../../issues/new?template=bug_report.yml), [request an app](../../issues/new?template=app_request.yml) or star ⭐ the repo. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
 A self-contained web panel for an existing Ubuntu Server 24.04 / 26.04. It manages local AI models, Docker apps, multi-GPU telemetry and a browser terminal, all on **port 1234**. It does not change the kernel and needs no custom ISO. It runs as systemd services under `/opt/ai-panel`.
 
 It works the same on **Ubuntu Desktop** 24.04 / 26.04. The panel runs in the background, and you open it in any browser, on the machine itself (http://localhost:1234) or from another device.

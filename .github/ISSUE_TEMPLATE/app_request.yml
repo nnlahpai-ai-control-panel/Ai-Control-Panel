@@ -1,0 +1,25 @@
+name: App request
+description: Suggest an app for the 1-click App Store
+labels: [app-request]
+body:
+  - type: input
+    id: name
+    attributes:
+      label: App name and website
+      placeholder: Paperless-ngx - https://docs.paperless-ngx.com
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is it useful?
+  - type: dropdown
+    id: gpu
+    attributes:
+      label: Does it use a GPU?
+      options: ["No", "Optional", "Yes, NVIDIA", "Yes, AMD", "Yes, both"]
+  - type: textarea
+    id: compose
+    attributes:
+      label: Working docker-compose.yml (if you have one)
+      render: yaml

@@ -1,0 +1,29 @@
+name: Hardware report
+description: Share how the panel runs on your machine (helps everyone with similar hardware)
+labels: [hardware-report]
+body:
+  - type: input
+    id: gpus
+    attributes:
+      label: GPUs
+      placeholder: e.g. Tesla P40 24GB + GTX 1080 8GB
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: CPU / RAM / Ubuntu version
+      placeholder: Ryzen 5 5600, 64GB, Ubuntu Server 24.04
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Which engine did you use?
+      multiple: true
+      options: [llama.cpp (Vulkan pool), Ollama, Both]
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Models you ran, tokens/sec, did the GPUs pool correctly, anything you had to change
+    validations:
+      required: true

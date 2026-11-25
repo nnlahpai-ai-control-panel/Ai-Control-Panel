@@ -1,0 +1,35 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Ubuntu version
+      placeholder: Ubuntu Server 24.04.2 / Ubuntu Desktop 26.04
+    validations:
+      required: true
+  - type: input
+    id: gpus
+    attributes:
+      label: GPUs
+      placeholder: e.g. RTX 3060 12GB + RX 6800 16GB + GTX 1080 8GB
+  - type: input
+    id: version
+    attributes:
+      label: Panel version
+      description: Shown under the logo, top left
+      placeholder: v1.2.0
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Paste the output of: journalctl -u ai-panel -n 100 --no-pager (and the task log from the Tasks drawer if relevant)"
+      render: shell
