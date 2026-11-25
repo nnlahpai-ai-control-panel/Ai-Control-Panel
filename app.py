@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"

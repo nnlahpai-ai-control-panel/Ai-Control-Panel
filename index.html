@@ -227,6 +227,7 @@
         </div>
       </div>
       <div id="dockerWarn" class="hidden card p-4 text-amber-300"></div>
+      <div id="appInfo" class="hidden card p-4"></div>
       <div id="appGrid" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"></div>
     </section>
 
@@ -655,6 +656,7 @@ function renderApps() {
   $$('#catBtns button').forEach(b => { b.classList.toggle('btn-p', b.textContent === appCat); b.classList.toggle('btn-g', b.textContent !== appCat); });
   const f = $('#appFilter').value.toLowerCase();
   const list = appsCache.filter(a => (appCat === 'All' || (appCat === 'Installed' ? a.installed : a.category === appCat)) && (!f || (a.name + a.description + a.category).toLowerCase().includes(f)));
+  renderAppInfo();
   $('#appGrid').innerHTML = list.map(a => {
     const url = appUrl(a);
     return `<div class="card p-4 flex flex-col">
@@ -672,6 +674,24 @@ function renderApps() {
         <button class="btn btn-g" onclick="appMenu('${a.id}')">⋯</button>`}
       </div></div>`;
   }).join('') || '<p class="text-slate-500">No apps match.</p>';
+}
+const MUSIC_SOURCES = [
+  ['YouTube Audio Library', 'https://studio.youtube.com/channel/UC/music', 'Free music and sound effects made for YouTube. Open YouTube Studio > Audio Library. Some tracks ask you to credit the artist.'],
+  ['Pixabay Music', 'https://pixabay.com/music/', 'Free to use in videos, including on monetised channels. No credit needed.'],
+  ['Free Music Archive', 'https://freemusicarchive.org', 'Creative Commons music. Check each track: CC BY is fine for YouTube, but avoid NC (non-commercial) if you earn money and ND (no changes) for remixes.'],
+  ['ccMixter', 'https://ccmixter.org', 'Creative Commons remixes, instrumentals and a cappellas that you are allowed to remix.'],
+  ['Incompetech (Kevin MacLeod)', 'https://incompetech.com/music/', 'Thousands of CC BY tracks. Put the credit line in your video description.'],
+  ['Epidemic Sound', 'https://www.epidemicsound.com', 'Paid subscription. Covers your channel, so Content ID claims are cleared.'],
+  ['Artlist', 'https://artlist.io', 'Paid licence for music and sound effects in your videos, for life.'],
+];
+function renderAppInfo() {
+  const el = $('#appInfo');
+  if (appCat !== 'Music') { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  el.innerHTML = `<div class="font-bold text-lg">🎼 Free and licensed music sources</div>
+    <p class="text-sm text-slate-400 mt-1">Only upload music you made yourself (for example in ACE-Step) or have a licence for. Removing vocals, adding lyrics or changing the speed does <b>not</b> make someone else's song yours, and YouTube Content ID will still claim it. Upload as <b>Unlisted</b> first to check for claims.</p>
+    <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 mt-3">${MUSIC_SOURCES.map(([n, u, d]) => `<a class="block rounded-lg bg-ink-800 hover:bg-ink-700 p-3" href="${u}" target="_blank" rel="noopener noreferrer"><div class="font-semibold text-sky-300">${esc(n)} ↗</div><div class="text-xs text-slate-400 mt-1">${esc(d)}</div></a>`).join('')}</div>
+    <p class="text-xs text-slate-500 mt-3">Licences change, so check the terms on each site before you publish. Safe to use: your own songs, ACE-Step songs, CC0, CC BY and CC BY-SA music, and paid licences. Not safe: karaoke or instrumental versions of popular songs.</p>`;
 }
 $('#appFilter').oninput = renderApps;
 async function installDialog(id) {
