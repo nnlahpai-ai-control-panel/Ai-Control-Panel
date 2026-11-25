@@ -205,14 +205,17 @@
     },
     {
       "id": "filebrowser",
-      "name": "File Browser",
+      "name": "FileBrowser Quantum",
       "category": "Files",
       "icon": "🗂️",
       "port": 8090,
-      "description": "Web file manager for the panel's app data folder.",
-      "compose": "services:\n  filebrowser:\n    image: filebrowser/filebrowser:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    volumes:\n      - /opt/ai-panel/data:/srv\n      - ${DATA_DIR}/database:/database\n      - ${DATA_DIR}/config:/config\n",
-      "website": "https://filebrowser.org",
-      "notes": "The first-run admin password is printed in the app logs (Logs button)."
+      "description": "Modern web file manager for every app's data and the shared media folder: previews, video thumbnails, search, share links and multiple users.",
+      "compose": "services:\n  filebrowser:\n    image: gtstef/filebrowser:stable\n    restart: unless-stopped\n    user: \"0:0\"\n    ports:\n      - \"${APP_PORT}:80\"\n    environment:\n      FILEBROWSER_CONFIG: /home/filebrowser/config.yaml\n      FILEBROWSER_DATABASE_PATH: /home/filebrowser/data/database.sqlite\n      FILEBROWSER_ADMIN_PASSWORD: ${ADMIN_PASSWORD}\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/data:/home/filebrowser/data\n      - /opt/ai-panel/data:/srv\n",
+      "env": {
+        "ADMIN_PASSWORD": "{{random}}"
+      },
+      "website": "https://github.com/gtsteffaniak/filebrowser",
+      "notes": "Log in as admin. The password is in App secrets. For the whole server (OS folders too), use the Files tab built into the panel."
     },
     {
       "id": "wordpress",

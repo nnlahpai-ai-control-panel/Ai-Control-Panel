@@ -1,30 +1,81 @@
-# AI Server Control Panel
+<div align="center">
 
-**Turn any Ubuntu box with a pile of mismatched GPUs into a local AI server, managed from your browser.**
+# 🧠 AI Server Control Panel
 
-Pool an RTX 3060 + RX 6800 + old GTX 1080 into one big VRAM pool for LLMs, install Open WebUI, ComfyUI, Immich and 25 more apps with one click, and watch every GPU, drive and fan. No SSH needed.
+### Every GPU you own. One AI server. One browser tab.
+
+**Mix NVIDIA, AMD and Intel cards into one big pool of VRAM, run big local LLMs on it, and manage the whole server from your browser. No SSH, no cloud, no monthly bill.**
+
+![Ubuntu 24.04 / 26.04](https://img.shields.io/badge/Ubuntu-24.04%20%7C%2026.04-E95420?logo=ubuntu&logoColor=white)
+![NVIDIA + AMD + Intel](https://img.shields.io/badge/GPUs-NVIDIA%20%2B%20AMD%20%2B%20Intel-76B900)
+![52 apps](https://img.shields.io/badge/App%20Store-52%20apps-0ea5e9)
+![License Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)
+
+</div>
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nnlahpai-ai-control-panel/ai-control-panel/main/install_app.sh -o install_app.sh
 sudo bash install_app.sh
 ```
 
+Two commands. About ten minutes later you open `http://your-server:1234` and you're in.
+
 ![Dashboard](docs/screenshots/dashboard.png)
+
+## ✨ Why people use it
+
+### 🧩 Automatic VRAM pooling for any GPU
+That RTX 3060 in your desktop, the RX 6800 from your last build and the old GTX 1080 in the drawer can all work on **one model together**. The panel finds every card, reads its VRAM, and splits the model across them for you: **12GB + 16GB + 8GB = 36GB** of VRAM for one LLM. NVIDIA, AMD and Intel can all be in the same pool, through llama.cpp's Vulkan backend. You don't have to work out a single split ratio.
+
+### 🔌 GPU hot plug and auto rebalance
+The panel checks your GPUs every 5 seconds. If a card is added, removed, or crashes and drops off the bus, it notices within about 10 seconds. It then restarts llama.cpp and Ollama and **re-splits the model across the GPUs you have now**. Your AI keeps running on what's left instead of crashing. Every change shows on the dashboard with a timestamp, and you can turn it off or press **Rebalance now** whenever you like.
+
+### 🎛️ GPU pools: AI cards vs media cards
+Put your fast cards in an **AI** pool for LLMs and image models, and an older card in a **Media** pool for Jellyfin and Immich. Each engine and app only touches the cards you give it.
+
+### 🛍️ 52 one-click apps, with GPU passthrough
+Open WebUI, ComfyUI, InvokeAI, n8n, Immich, Jellyfin, Nextcloud, WordPress, Home Assistant, Cloudflare Tunnel and many more. Apps that use the GPU get NVIDIA or AMD passthrough in one click. You can also bring your own Docker Compose file, from your computer or a URL.
+
+### 🎬 A creative studio in your browser
+Make **AI images** (ComfyUI, Fooocus, InvokeAI), **AI music and songs** (ACE-Step), **auto-generated short videos** (MoneyPrinterTurbo), subtitles, voice-overs and translations. Then edit them in **Kdenlive, Blender, GIMP or Krita**, running in a browser tab. Everything runs on your own GPUs, and the songs and images you make stay yours.
+
+### 📁 A file manager for the whole server
+Browse every folder on the server and every app's data. Edit config files, upload by drag and drop, download whole folders as zip, preview photos, videos and PDFs, and fix permissions. There's no FTP or SSH to set up.
+
+### 📊 See everything, set up nothing
+Every GPU, drive, fan and network port is found on its own and shown live, with history charts. That includes temperature, power, VRAM, SMART drive health, SSD wear and dying-disk warnings.
+
+### ⌨️ Root terminal in the browser, and one-click updates
+You get a full shell with no SSH client. Update one app, every app, the AI engines or the panel itself with one click.
 
 | | |
 |---|---|
 | ![AI models](docs/screenshots/llama-cpp.png) | ![App Store](docs/screenshots/app-store.png) |
-| **llama.cpp mixed-GPU pool**: NVIDIA + AMD + Intel in one model | **1-click App Store**: 52 apps with GPU passthrough |
+| **Mixed-GPU llama.cpp**: NVIDIA + AMD + Intel in one model | **App Store**: 52 apps with GPU passthrough |
+| ![GPU hot plug](docs/screenshots/gpu-hotplug.png) | ![Files](docs/screenshots/files.png) |
+| **Hot plug and auto rebalance** | **File manager** for the OS and every app |
 | ![GPU pools](docs/screenshots/gpu-pools.png) | ![Terminal](docs/screenshots/terminal.png) |
-| **GPU pools**: e.g. "AI" cards vs "Media" cards | **Browser terminal**: full root shell, no SSH |
+| **GPU pools**: "AI" cards vs "Media" cards | **Browser terminal**: full root shell |
 
 *Screenshots use demo GPU data.*
 
-**Feedback wanted!** If you try it, please [share a hardware report](../../issues/new?template=hardware_report.yml), [report a bug](../../issues/new?template=bug_report.yml), [request an app](../../issues/new?template=app_request.yml) or star ⭐ the repo. See [CONTRIBUTING.md](CONTRIBUTING.md).
+### How it compares
+
+| | AI Server Control Panel | Doing it by hand | Generic home-server panels |
+|---|:-:|:-:|:-:|
+| Pool NVIDIA + AMD + Intel VRAM for one LLM | ✅ automatic | ⚠️ hours of flags | ❌ |
+| Re-split models when a GPU appears or dies | ✅ | ❌ | ❌ |
+| GPU pools per app and engine | ✅ | ⚠️ manual env vars | ❌ |
+| Ollama + llama.cpp model manager | ✅ | ⚠️ CLI | ❌ |
+| 1-click apps with GPU passthrough | ✅ 52 apps | ❌ | ✅ (no GPU choice) |
+| SMART, GPU, fan and network monitoring | ✅ | ⚠️ many tools | ⚠️ basic |
+| Runs on your existing Ubuntu, no new OS | ✅ | ✅ | ⚠️ some replace the OS |
+
+**Feedback wanted!** If you try it, please [share a hardware report](../../issues/new?template=hardware_report.yml), [report a bug](../../issues/new?template=bug_report.yml), [request an app](../../issues/new?template=app_request.yml) or star ⭐ the repo. Reports from mixed NVIDIA + AMD rigs and older cards (GTX 10xx, Tesla) help most. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-A self-contained web panel for an existing Ubuntu Server 24.04 / 26.04. It manages local AI models, Docker apps, multi-GPU telemetry and a browser terminal, all on **port 1234**. It does not change the kernel and needs no custom ISO. It runs as systemd services under `/opt/ai-panel`.
+A self-contained web panel for an existing Ubuntu Server 24.04 / 26.04. It manages local AI models, Docker apps, multi-GPU telemetry, files and a browser terminal, all on **port 1234**. It does not change the kernel and needs no custom ISO. It runs as systemd services under `/opt/ai-panel`.
 
 It works the same on **Ubuntu Desktop** 24.04 / 26.04. The panel runs in the background, and you open it in any browser, on the machine itself (http://localhost:1234) or from another device.
 
@@ -44,7 +95,7 @@ The **GPU & System** tab finds every piece of hardware on its own. Nothing needs
 
 Drive health uses `smartmontools`, and RAM stick details use `dmidecode`. The installer adds both. For even deeper monitoring with alerts, install **Netdata** or **Uptime Kuma** from the App Store.
 
-## Files
+## What's in this repo
 
 | File | What it is |
 |---|---|
@@ -87,6 +138,19 @@ Running the installer again upgrades in place and keeps your login, apps, models
 * llama-server exposes an OpenAI-compatible API at `http://127.0.0.1:8081/v1`. Open WebUI is pre-wired to both Ollama and llama.cpp.
 * Docker apps that use a GPU (ComfyUI, Immich ML, Jellyfin) get NVIDIA (CUDA) *or* AMD (ROCm) passthrough. You choose which in the install dialog, because container images are vendor-specific.
 
+### GPU hot plug and auto rebalance: how it works
+
+* Every 5 seconds the panel lists the GPUs by PCI slot. A change has to last 10 seconds to count, so a single slow reading doesn't trigger anything.
+* When a GPU appears or disappears, the panel:
+  1. logs the event on **GPU & System > GPU hot plug** (what was added or removed, and the new GPU count and VRAM total),
+  2. restarts **llama.cpp** with a new `--tensor-split` for the GPUs that are left (or for its GPU pool), if it was running with Tensor split = auto or fit,
+  3. restarts **Ollama**, and re-applies its GPU pool if it has one, so it spreads models over the new set of cards.
+* Typical triggers: a card falls off the bus after a driver crash (NVIDIA "Xid 79"), an eGPU over Thunderbolt or OCuLink is plugged in or out, a driver is reloaded, or you swap cards and reboot.
+* Real PCIe hot plug of a desktop card while the machine is on needs a motherboard and riser that support it. Most consumer boards don't, so power off to add or remove internal cards. The panel rebalances on the next boot either way.
+* Turn it off with the **Auto rebalance** switch if you'd rather restart things yourself. **Rebalance now** re-splits on demand, for example after you change GPU pools.
+* If llama.cpp has a fixed device list (Devices field), the panel leaves it alone and tells you, because device numbers can change when cards change.
+* Docker apps that were given a specific GPU keep that setting. Use ⋯ > Reconfigure on the app if its GPU is gone.
+
 ### How many GPUs can be pooled?
 
 | | |
@@ -121,6 +185,16 @@ Notes:
 * "All GPUs" (no pool) is the default everywhere.
 * A container uses one vendor, so for a mixed pool the app picks NVIDIA or AMD cards (the GPU passthrough option).
 * After changing a pool's members, restart llama.cpp, click Apply for Ollama again, and Reconfigure the apps that use it.
+
+## File manager (Files tab)
+
+* **Places:** server root, home folders, every app's settings and data, shared media, AI models, system logs, `/etc` and every mounted drive with its free space.
+* **Installed apps:** each one has a **data** and a **config** link, and every app's ⋯ menu has a **📁 Files** button that jumps straight to its folder.
+* Open folders, edit text and config files in the browser (Ctrl+S saves), and preview photos, video, audio and PDFs.
+* Upload many files at once, by button or by dragging them onto the page. Large files are streamed, with a progress bar.
+* Download any file, or a whole folder as a `.zip`. Rename, move, copy, create, delete, and change permissions and owner.
+* It runs as root, like the terminal. To stop accidents, it refuses to delete, move or zip top-level system folders such as `/`, `/etc`, `/usr` and `/opt/ai-panel`. You can still do that from the Terminal if you really mean it.
+* Prefer a separate file app with users, share links and video thumbnails? Install **FileBrowser Quantum** from the App Store. It shows all app data and shared media.
 
 ## Getting models and apps in
 

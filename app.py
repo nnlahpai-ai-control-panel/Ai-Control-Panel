@@ -26,6 +26,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -41,7 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"
@@ -621,6 +622,7 @@ def _sample() -> None:
     _prev.update(t=now, nic=nics, disk=disks)
     gpus = all_gpus()
     LIVE.update(net=net, disk=dsk, gpus=gpus, t=now)
+    _gpu_watch(gpus)
     phys_net = {k: v for k, v in net.items() if not VIRTUAL_NICS.match(k)}
     whole = {k: v for k, v in dsk.items() if _is_whole_disk(k)}
     vm = psutil.virtual_memory()
@@ -650,6 +652,9 @@ async def sampler_loop() -> None:
     while True:
         try:
             await asyncio.to_thread(_sample)
+            ev, GPU_WATCH["todo"] = GPU_WATCH["todo"], None
+            if ev:
+                asyncio.create_task(gpu_rebalance(ev))
         except Exception as e:  # never let monitoring kill the panel
             print("sampler:", e, file=sys.stderr)
         await asyncio.sleep(5)
@@ -2046,6 +2051,363 @@ async def update_engines():
         task_done(t, rc == 0, "Engines updated" if rc == 0 else "Update failed")
     asyncio.create_task(run())
     return {"task": t["id"]}
+
+
+# --------------------------------------------------------------------------------------
+# GPU hot plug: notice GPUs that appear, disappear or crash, then re-split models across what's left
+# --------------------------------------------------------------------------------------
+GPU_WATCH: dict = {"known": None, "names": {}, "pending": None, "count": 0, "events": [], "todo": None}
+
+
+def _gpu_watch(gpus: list[dict]) -> None:
+    """Called from the sampler thread every 5 s. A change must hold for 2 samples (10 s) to count."""
+    sig = frozenset(g["bus"] for g in gpus if g.get("bus"))
+    names = {g["bus"]: (g["name"] if g["name"].lower().startswith(g["vendor"].lower()) else f'{g["vendor"]} {g["name"]}') + (f' ({round((g.get("vram_total_mb") or 0) / 1024)}GB)' if g.get("vram_total_mb") else "") for g in gpus}
+    w = GPU_WATCH
+    if w["known"] is None:
+        w["known"], w["names"] = sig, names
+        return
+    if sig == w["known"]:
+        w["pending"], w["count"] = None, 0
+        return
+    if sig != w["pending"]:
+        w["pending"], w["count"] = sig, 1
+        return
+    w["count"] += 1
+    if w["count"] < 2:
+        return
+    added = sorted(sig - w["known"])
+    removed = sorted(w["known"] - sig)
+    allnames = {**w["names"], **names}
+    ev = {"t": int(time.time()), "added": [allnames.get(b, b) for b in added], "removed": [allnames.get(b, b) for b in removed],
+          "gpus": len(sig), "vram_gb": round(sum((g.get("vram_total_mb") or 0) for g in gpus) / 1024, 1), "actions": []}
+    w["known"], w["names"], w["pending"], w["count"] = sig, names, None, 0
+    w["events"].insert(0, ev)
+    del w["events"][50:]
+    w["todo"] = ev
+
+
+def _svc_active(name: str) -> bool:
+    rc, out = run_quick(["systemctl", "is-active", name], timeout=10)
+    return out.strip().startswith("active")
+
+
+async def gpu_rebalance(ev: dict, manual: bool = False) -> None:
+    cfg = load_config()
+    if not manual and not cfg.get("auto_rebalance", True):
+        ev["actions"].append("Auto rebalance is off, nothing was restarted")
+        return
+    _vk_cache["t"] = 0  # Vulkan device numbers may have shifted
+    t = new_task("gpu", "Rebalance models across GPUs")
+    t["progress"] = None
+    try:
+        l = cfg["llama"]
+        if l.get("model") and await asyncio.to_thread(_svc_active, "ai-llama.service"):
+            if l.get("devices"):
+                msg = "llama.cpp uses a fixed device list, so it was left alone. Pick devices again on the Models page."
+            else:
+                try:
+                    penv = pool_vk_env(l.get("pool", ""))
+                except HTTPException as e:
+                    penv = {}
+                    task_log(t, f"Pool problem ({e.detail}), using every GPU instead")
+                devs = await asyncio.to_thread(llama_devices, penv)
+                args = build_llama_args(cfg, devs)
+                write_llama_runner(args, penv)
+                rc, out = run_quick(["systemctl", "restart", "ai-llama.service"], timeout=60)
+                split = auto_tensor_split(devs) if l.get("tensor_split", "auto") == "auto" else l.get("tensor_split") or "fit"
+                msg = (f"llama.cpp restarted on {len(devs)} GPU(s), {round(sum(d['total_mb'] for d in devs) / 1024, 1)}GB VRAM, split {split or 'single GPU'}"
+                       if rc == 0 else "llama.cpp restart failed: " + out[-200:])
+            ev["actions"].append(msg)
+            task_log(t, msg)
+        if await asyncio.to_thread(_svc_active, "ollama"):
+            if cfg.get("ollama_pool"):
+                try:
+                    r = await ollama_pool(PoolPick(pool=cfg["ollama_pool"]))
+                    msg = "Ollama pool re-applied and Ollama restarted" if r.get("ok") else "Ollama restart failed"
+                except HTTPException as e:
+                    msg = f"Ollama pool could not be re-applied: {e.detail}"
+            else:
+                rc, out = run_quick(["systemctl", "restart", "ollama"], timeout=60)
+                msg = "Ollama restarted and now spreads models over every GPU" if rc == 0 else "Ollama restart failed"
+            ev["actions"].append(msg)
+            task_log(t, msg)
+        if not ev["actions"]:
+            ev["actions"].append("No model server was running, so nothing needed a restart")
+        task_done(t, True, "; ".join(ev["actions"]))
+    except Exception as e:
+        ev["actions"].append(f"Rebalance failed: {e}")
+        task_done(t, False, str(e))
+
+
+class GpuSettings(BaseModel):
+    auto_rebalance: bool = True
+
+
+@app.get("/api/gpu/events")
+async def gpu_events():
+    return {"auto_rebalance": load_config().get("auto_rebalance", True), "events": GPU_WATCH["events"],
+            "gpus": len(GPU_WATCH["known"] or [])}
+
+
+@app.post("/api/gpu/settings")
+async def gpu_settings(body: GpuSettings):
+    cfg = load_config()
+    cfg["auto_rebalance"] = body.auto_rebalance
+    save_config(cfg)
+    return {"ok": True}
+
+
+@app.post("/api/gpu/rebalance")
+async def gpu_rebalance_now():
+    gpus = await asyncio.to_thread(all_gpus)
+    ev = {"t": int(time.time()), "added": [], "removed": [], "manual": True, "gpus": len(gpus),
+          "vram_gb": round(sum((g.get("vram_total_mb") or 0) for g in gpus) / 1024, 1), "actions": []}
+    GPU_WATCH["events"].insert(0, ev)
+    await gpu_rebalance(ev, manual=True)
+    return ev
+
+
+# --------------------------------------------------------------------------------------
+# File manager: browse, edit, upload and download anywhere on the server (root, like the terminal)
+# --------------------------------------------------------------------------------------
+PROTECTED_DIRS = {"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64", "/libx32", "/media", "/mnt",
+                  "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var", "/snap",
+                  str(HOME), str(APPS_DIR), str(DATA_DIR), str(MODELS_DIR)}
+TEXT_LIMIT = 2 * 1024 * 1024
+
+
+def fpath(p: str) -> Path:
+    if not p or not p.startswith("/") or "\x00" in p:
+        raise HTTPException(400, "Use a full path that starts with /")
+    return Path(os.path.normpath(p))
+
+
+def _guard(p: Path, what: str) -> None:
+    if str(p) in PROTECTED_DIRS:
+        raise HTTPException(400, f"{p} is a system folder and can't be {what} from here. Use the Terminal if you really mean it.")
+
+
+def _owner(uid: int) -> str:
+    try:
+        import pwd
+        return pwd.getpwuid(uid).pw_name
+    except Exception:
+        return str(uid)
+
+
+def _entry(p: Path) -> dict:
+    st = p.lstat()
+    link = p.is_symlink()
+    try:
+        is_dir = p.is_dir()
+    except OSError:
+        is_dir = False
+    return {"name": p.name, "dir": is_dir, "link": os.readlink(p) if link else None, "size": st.st_size if not is_dir else None,
+            "mtime": int(st.st_mtime), "mode": oct(st.st_mode & 0o7777)[2:], "owner": _owner(st.st_uid)}
+
+
+@app.get("/api/files/places")
+async def file_places():
+    places = [{"name": "Server root", "path": "/", "icon": "🖥️"}, {"name": "Home folders", "path": "/home", "icon": "🏠"},
+              {"name": "Root home", "path": "/root", "icon": "🔑"}, {"name": "App settings", "path": str(APPS_DIR), "icon": "🧩"},
+              {"name": "App data", "path": str(DATA_DIR), "icon": "🗄️"}, {"name": "Shared media", "path": str(DATA_DIR / "shared-media"), "icon": "🎬"},
+              {"name": "AI models (GGUF)", "path": str(MODELS_DIR), "icon": "🧠"}, {"name": "System logs", "path": "/var/log", "icon": "📜"},
+              {"name": "System config", "path": "/etc", "icon": "⚙️"}]
+    seen = {"/"}
+    for part in psutil.disk_partitions(all=False):
+        mp = part.mountpoint
+        if mp in seen or mp.startswith(("/boot", "/snap", "/var/lib/docker", "/proc", "/sys", "/run")) \
+                or part.fstype in ("squashfs", "overlay", "tmpfs", "devtmpfs") or part.fstype.startswith("fuse."):
+            continue
+        seen.add(mp)
+        try:
+            u = psutil.disk_usage(mp)
+            if u.total < 1 << 30:
+                continue
+            places.append({"name": f"Drive {mp}", "path": mp, "icon": "💽", "free": u.free, "total": u.total})
+        except OSError:
+            pass
+    apps = sorted(d.name for d in APPS_DIR.iterdir() if d.is_dir()) if APPS_DIR.exists() else []
+    return {"places": [p for p in places if os.path.isdir(p["path"])], "apps": apps}
+
+
+@app.get("/api/files/list")
+async def file_list(path: str = "/"):
+    p = fpath(path)
+    if not p.is_dir():
+        raise HTTPException(404, "Folder not found")
+    out = []
+    try:
+        for c in p.iterdir():
+            try:
+                out.append(_entry(c))
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(403, "Permission denied")
+    out.sort(key=lambda e: (not e["dir"], e["name"].lower()))
+    try:
+        u = psutil.disk_usage(str(p))
+        disk = {"free": u.free, "total": u.total}
+    except OSError:
+        disk = None
+    return {"path": str(p), "parent": str(p.parent) if str(p) != "/" else None, "entries": out[:5000],
+            "truncated": len(out) > 5000, "disk": disk}
+
+
+@app.get("/api/files/read")
+async def file_read(path: str):
+    p = fpath(path)
+    if not p.is_file():
+        raise HTTPException(404, "File not found")
+    if p.stat().st_size > TEXT_LIMIT:
+        raise HTTPException(400, "File is bigger than 2MB. Download it instead.")
+    data = p.read_bytes()
+    if b"\x00" in data[:8192]:
+        raise HTTPException(400, "This looks like a binary file. Download it instead.")
+    return {"path": str(p), "content": data.decode("utf-8", errors="replace"), "mtime": int(p.stat().st_mtime)}
+
+
+class FileWrite(BaseModel):
+    path: str
+    content: str
+
+
+@app.post("/api/files/write")
+async def file_write(body: FileWrite):
+    p = fpath(body.path)
+    if p.exists() and not p.is_file():
+        raise HTTPException(400, "That path is a folder")
+    if not p.parent.is_dir():
+        raise HTTPException(400, "Folder does not exist")
+    tmp = p.with_name(f".{p.name}.aipanel-tmp")
+    tmp.write_text(body.content)
+    if p.exists():
+        st = p.stat()
+        os.chmod(tmp, st.st_mode & 0o7777)
+        try:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass
+    tmp.replace(p)
+    return {"ok": True}
+
+
+class FilePath(BaseModel):
+    path: str
+
+
+@app.post("/api/files/mkdir")
+async def file_mkdir(body: FilePath):
+    p = fpath(body.path)
+    if p.exists():
+        raise HTTPException(400, "Already exists")
+    p.mkdir(parents=True)
+    return {"ok": True}
+
+
+class FileMove(BaseModel):
+    src: str
+    dest: str
+    duplicate: bool = False
+
+
+@app.post("/api/files/move")
+async def file_move(body: FileMove):
+    s, d = fpath(body.src), fpath(body.dest)
+    if not s.exists() and not s.is_symlink():
+        raise HTTPException(404, "Source not found")
+    if d.is_dir():
+        d = d / s.name
+    if d.exists():
+        raise HTTPException(400, f"{d} already exists")
+    if str(d).startswith(str(s) + "/"):
+        raise HTTPException(400, "Can't put a folder inside itself")
+    if not body.duplicate:
+        _guard(s, "moved")
+    t0 = time.time()
+    if body.duplicate:
+        await asyncio.to_thread(shutil.copytree if s.is_dir() and not s.is_symlink() else shutil.copy2, s, d,
+                                **({"symlinks": True} if s.is_dir() and not s.is_symlink() else {"follow_symlinks": False}))
+    else:
+        await asyncio.to_thread(shutil.move, str(s), str(d))
+    return {"ok": True, "dest": str(d), "seconds": round(time.time() - t0, 1)}
+
+
+class FileDelete(BaseModel):
+    paths: list[str]
+
+
+@app.post("/api/files/delete")
+async def file_delete(body: FileDelete):
+    ps = [fpath(x) for x in body.paths]
+    for p in ps:
+        _guard(p, "deleted")
+    for p in ps:
+        if p.is_dir() and not p.is_symlink():
+            await asyncio.to_thread(shutil.rmtree, p)
+        elif p.exists() or p.is_symlink():
+            p.unlink()
+    return {"ok": True, "deleted": len(ps)}
+
+
+class FileChmod(BaseModel):
+    path: str
+    mode: str
+    owner: str = ""
+
+
+@app.post("/api/files/chmod")
+async def file_chmod(body: FileChmod):
+    p = fpath(body.path)
+    _guard(p, "changed")
+    if not re.match(r"^[0-7]{3,4}$", body.mode):
+        raise HTTPException(400, "Mode must look like 644 or 755")
+    os.chmod(p, int(body.mode, 8))
+    if body.owner:
+        if not re.match(r"^[a-z_][a-z0-9_\-]*(:[a-z_][a-z0-9_\-]*)?$|^\d+(:\d+)?$", body.owner):
+            raise HTTPException(400, "Owner must look like user, user:group or 1000:1000")
+        u, _, g = body.owner.partition(":")
+        shutil.chown(p, int(u) if u.isdigit() else u, (int(g) if g.isdigit() else g) if g else None)
+    return {"ok": True}
+
+
+@app.put("/api/files/upload")
+async def file_upload(request: Request, dir: str, name: str):
+    folder = fpath(dir)
+    if not folder.is_dir():
+        raise HTTPException(400, "Folder does not exist")
+    if not name or "/" in name or name in (".", ".."):
+        raise HTTPException(400, "Bad file name")
+    dest = folder / name
+    tmp = folder / f".{name}.upload"
+    n = 0
+    try:
+        with open(tmp, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                n += len(chunk)
+        tmp.replace(dest)
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(500, f"Upload failed: {e}")
+    return {"ok": True, "path": str(dest), "bytes": n}
+
+
+@app.get("/api/files/download")
+async def file_download(path: str, inline: bool = False):
+    p = fpath(path)
+    if p.is_file():
+        return FileResponse(p, filename=p.name, content_disposition_type="inline" if inline else "attachment")
+    if p.is_dir():
+        _guard(p, "zipped")
+        from starlette.background import BackgroundTask
+        tmpdir = Path(tempfile.mkdtemp(prefix="aipanel-zip-"))
+        archive = await asyncio.to_thread(shutil.make_archive, str(tmpdir / (p.name or "root")), "zip", str(p))
+        return FileResponse(archive, filename=(p.name or "root") + ".zip",
+                            background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True))
+    raise HTTPException(404, "Not found")
 
 
 # --------------------------------------------------------------------------------------

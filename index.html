@@ -64,6 +64,7 @@
         <button class="tab active" data-tab="dash">📊 <span>GPU &amp; System</span></button>
         <button class="tab" data-tab="models">🤖 <span>AI Models</span></button>
         <button class="tab" data-tab="apps">🛍️ <span>App Store</span></button>
+        <button class="tab" data-tab="files">📁 <span>Files</span></button>
         <button class="tab" data-tab="term">⌨️ <span>Terminal</span></button>
         <button class="tab" data-tab="settings">⚙️ <span>Settings</span></button>
       </nav>
@@ -126,6 +127,16 @@
         </div>
         <div id="poolEditor" class="mt-4 overflow-x-auto"></div>
         <div class="mt-3 flex gap-2 items-center"><button id="savePools" class="btn btn-p">Save pools</button><span id="poolMsg" class="text-sm text-slate-400"></span></div>
+      </div>
+      <div class="card p-5">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div>
+            <h2 class="text-lg font-bold">GPU hot plug and auto rebalance</h2>
+            <p class="text-sm text-slate-400">The panel checks your GPUs every 5 seconds. When a card is added, removed or drops off the bus, llama.cpp and Ollama are restarted and the model is re-split across the GPUs you have now.</p>
+          </div>
+          <div class="flex gap-3 items-center"><label class="text-sm flex items-center gap-2"><input type="checkbox" id="autoRebal" class="accent-sky-500"> Auto rebalance</label><button id="rebalNow" class="btn btn-g">⚖ Rebalance now</button></div>
+        </div>
+        <div id="gpuEvents" class="mt-3 text-sm divide-y divide-ink-800"></div>
       </div>
     </section>
 
@@ -242,6 +253,38 @@
       </div>
     </section>
 
+    <!-- ---------- FILES ---------- -->
+    <section id="tab-files" class="hidden">
+      <div class="grid gap-4 lg:grid-cols-[230px_1fr]">
+        <aside class="card p-3 space-y-3 self-start order-2 lg:order-1">
+          <div><div class="text-xs uppercase tracking-wide text-slate-500 mb-1 px-1">Places</div><div id="fPlaces" class="flex lg:flex-col gap-1 flex-wrap"></div></div>
+          <div><div class="text-xs uppercase tracking-wide text-slate-500 mb-1 px-1">Installed apps</div><div id="fApps" class="flex lg:flex-col gap-1 flex-wrap text-sm"></div></div>
+        </aside>
+        <div class="card p-3 min-w-0 order-1 lg:order-2" id="fDrop">
+          <div class="flex flex-wrap gap-2 items-center">
+            <button id="fUp" class="btn btn-g !py-1" title="Up one folder">⬆</button>
+            <button id="fRefresh" class="btn btn-g !py-1" title="Refresh">↻</button>
+            <input id="fPath" class="inp !py-1 font-mono text-sm flex-1 min-w-[12rem]" spellcheck="false">
+            <label class="text-sm text-slate-400 flex items-center gap-1"><input type="checkbox" id="fHidden" class="accent-sky-500"> Hidden</label>
+          </div>
+          <div class="flex flex-wrap gap-2 items-center mt-2">
+            <button id="fNewDir" class="btn btn-g !py-1">📁 New folder</button>
+            <button id="fNewFile" class="btn btn-g !py-1">📄 New file</button>
+            <label class="btn btn-p !py-1 cursor-pointer">⬆ Upload<input id="fUpload" type="file" multiple class="hidden"></label>
+            <span id="fSelBar" class="hidden flex gap-2 items-center"><span id="fSelCount" class="text-sm text-slate-400"></span>
+              <button id="fSelMove" class="btn btn-g !py-1">Move / copy</button><button id="fSelDel" class="btn btn-d !py-1">Delete</button></span>
+            <span id="fDisk" class="text-xs text-slate-500 ml-auto"></span>
+          </div>
+          <div id="fProgress" class="text-sm text-sky-300 mt-2"></div>
+          <div class="overflow-x-auto mt-2"><table class="w-full text-sm"><thead><tr class="text-left text-slate-400 border-b border-ink-800">
+            <th class="py-1 w-6"><input type="checkbox" id="fAll" class="accent-sky-500"></th><th class="py-1">Name</th><th class="py-1 text-right pr-3">Size</th>
+            <th class="py-1 hidden md:table-cell">Modified</th><th class="py-1 hidden md:table-cell">Owner</th><th class="py-1 hidden md:table-cell">Mode</th><th></th></tr></thead>
+            <tbody id="fList"></tbody></table></div>
+          <p class="text-xs text-slate-500 mt-3">Drop files anywhere on this card to upload. You are root here, the same as in the Terminal, so take care in system folders.</p>
+        </div>
+      </div>
+    </section>
+
     <!-- ---------- SETTINGS ---------- -->
     <section id="tab-settings" class="hidden grid gap-4 lg:grid-cols-2">
       <div class="card p-5 space-y-3">
@@ -351,9 +394,10 @@ function showTab(t) {
   currentTab = t; history.replaceState(null, '', '#' + t);
   $$('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
   $$('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + t));
-  if (t === 'dash') { loadStats(); loadPools(); loadDisks(); loadNet(); loadHistory(); loadHardware(); }
+  if (t === 'dash') { loadStats(); loadPools(); loadDisks(); loadNet(); loadHistory(); loadHardware(); loadGpuEvents(); }
   if (t === 'models') { loadPoolOptions(); loadOllama(); loadLlama(); }
   if (t === 'apps') loadApps();
+  if (t === 'files') { loadPlaces(); if (!files.entries.length) openDir(files.path); }
   if (t === 'term') openTerminal();
   if (t === 'settings') loadSettings();
 }
@@ -725,6 +769,136 @@ async function appAction(id, action, purge = false) {
     onTaskDone(task, loadApps);
   });
 }
+const jq = s => esc(JSON.stringify(s));
+
+// ===================================================================== GPU hot plug
+async function loadGpuEvents() {
+  const r = await api('/api/gpu/events'); $('#autoRebal').checked = r.auto_rebalance;
+  $('#gpuEvents').innerHTML = r.events.length ? r.events.slice(0, 8).map(e => `<div class="py-2"><div class="flex flex-wrap gap-2 items-center">
+      <span class="text-slate-500">${new Date(e.t * 1000).toLocaleString()}</span>
+      ${e.manual ? '<span class="pill bg-ink-700">manual</span>' : ''}${e.added.map(n => `<span class="pill bg-emerald-900 text-emerald-200">＋ ${esc(n)}</span>`).join('')}${e.removed.map(n => `<span class="pill bg-red-900 text-red-200">－ ${esc(n)}</span>`).join('')}
+      <span class="text-slate-400">now ${e.gpus} GPU(s), ${e.vram_gb}GB VRAM</span></div>
+      ${e.actions.length ? `<div class="text-slate-400 text-xs mt-1">${e.actions.map(esc).join(' · ')}</div>` : '<div class="text-xs text-slate-500 mt-1">Rebalancing...</div>'}</div>`).join('')
+    : `<p class="text-slate-500 py-2">No GPU changes since the panel started. Watching ${r.gpus} GPU(s).</p>`;
+}
+$('#autoRebal').onchange = e => guard(async () => { await post('/api/gpu/settings', { auto_rebalance: e.target.checked }); toast(e.target.checked ? 'Auto rebalance on' : 'Auto rebalance off'); });
+$('#rebalNow').onclick = e => guard(async () => { const ev = await post('/api/gpu/rebalance'); toast(ev.actions.join(' · ') || 'Done'); loadGpuEvents(); }, e.target);
+
+// ===================================================================== Files
+const files = { path: '/', entries: [], sel: new Set(), base: {} };
+const TEXT_EXT = /\.(txt|md|log|conf|cfg|ini|env|ya?ml|json|toml|xml|html?|css|js|ts|py|sh|bash|service|csv|tsv|sql|php|rb|go|rs|c|h|cpp|java|lua|properties|list|rules|gitignore|dockerfile)$|^(\.env|Dockerfile|Makefile|hosts|fstab|crontab|README|LICENSE)$/i;
+const MEDIA_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|ico|mp4|webm|mkv|mov|mp3|wav|ogg|flac|m4a|pdf)$/i;
+const fIcon = e => e.dir ? '📁' : e.link ? '🔗' : /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(e.name) ? '🖼️' : /\.(mp4|webm|mkv|mov|avi)$/i.test(e.name) ? '🎬' : /\.(mp3|wav|ogg|flac|m4a)$/i.test(e.name) ? '🎵' : /\.gguf$/i.test(e.name) ? '🧠' : /\.(zip|tar|gz|tgz|xz|7z|rar)$/i.test(e.name) ? '📦' : /\.pdf$/i.test(e.name) ? '📕' : '📄';
+const fJoin = (d, n) => (d === '/' ? '' : d) + '/' + n;
+async function loadPlaces() {
+  const r = await api('/api/files/places');
+  files.base = Object.fromEntries(r.places.map(p => [p.name, p.path]));
+  $('#fPlaces').innerHTML = r.places.map(p => `<button class="text-left px-2 py-1 rounded hover:bg-ink-800 text-sm whitespace-nowrap" onclick="openDir(${jq(p.path)})" title="${esc(p.path)}">${p.icon} ${esc(p.name)}${p.total ? ` <span class="text-xs text-slate-500">${fmtBytes(p.free)} free</span>` : ''}</button>`).join('');
+  const A = files.base['App settings'], D = files.base['App data'];
+  $('#fApps').innerHTML = r.apps.length ? r.apps.map(a => `<div class="flex items-center gap-1 px-2"><span class="flex-1 truncate">${esc(a)}</span><button class="text-sky-300 hover:underline text-xs" onclick="openDir(${jq(D + '/' + a)})">data</button><button class="text-sky-300 hover:underline text-xs" onclick="openDir(${jq(A + '/' + a)})">config</button></div>`).join('') : '<p class="text-slate-500 text-xs px-2">None yet</p>';
+}
+async function openDir(p) {
+  try {
+    const r = await api('/api/files/list?path=' + encodeURIComponent(p));
+    Object.assign(files, { path: r.path, entries: r.entries }); files.sel.clear();
+    $('#fPath').value = r.path; $('#fDisk').textContent = r.disk ? `${fmtBytes(r.disk.free)} free of ${fmtBytes(r.disk.total)}` : '';
+    renderFiles();
+  } catch (e) { toast(e.message, 'err'); }
+}
+function renderFiles() {
+  const show = files.entries.filter(e => $('#fHidden').checked || !e.name.startsWith('.'));
+  $('#fList').innerHTML = show.map(e => {
+    const p = fJoin(files.path, e.name);
+    return `<tr class="border-b border-ink-800 hover:bg-ink-800/50"><td class="py-1"><input type="checkbox" class="accent-sky-500 fSel" data-p="${esc(p)}" ${files.sel.has(p) ? 'checked' : ''}></td>
+      <td class="py-1"><button class="text-left hover:underline break-all" onclick="fOpen(${jq(p)},${e.dir})">${fIcon(e)} ${esc(e.name)}</button>${e.link ? ` <span class="text-xs text-slate-500">→ ${esc(e.link)}</span>` : ''}</td>
+      <td class="py-1 text-right pr-3 whitespace-nowrap text-slate-400">${e.dir ? '' : fmtBytes(e.size)}</td>
+      <td class="py-1 hidden md:table-cell text-slate-400 whitespace-nowrap">${new Date(e.mtime * 1000).toLocaleString()}</td>
+      <td class="py-1 hidden md:table-cell text-slate-400">${esc(e.owner)}</td><td class="py-1 hidden md:table-cell text-slate-400 font-mono">${esc(e.mode)}</td>
+      <td class="py-1 text-right"><button class="btn btn-g !py-0 !px-2" onclick="fMenu(${jq(p)},${e.dir})">⋯</button></td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="py-4 text-center text-slate-500">Empty folder</td></tr>';
+  $$('.fSel').forEach(cb => cb.onchange = () => { cb.checked ? files.sel.add(cb.dataset.p) : files.sel.delete(cb.dataset.p); fSelUpdate(); });
+  fSelUpdate();
+}
+function fSelUpdate() { $('#fSelBar').classList.toggle('hidden', !files.sel.size); $('#fSelCount').textContent = files.sel.size + ' selected'; }
+const dlUrl = (p, inline) => '/api/files/download?path=' + encodeURIComponent(p) + (inline ? '&inline=true' : '');
+async function fOpen(p, dir) {
+  if (dir) return openDir(p);
+  const n = p.split('/').pop();
+  if (MEDIA_EXT.test(n)) {
+    const u = dlUrl(p, true);
+    const body = /\.(mp4|webm|mkv|mov)$/i.test(n) ? `<video src="${u}" controls class="w-full max-h-[70vh]"></video>` : /\.(mp3|wav|ogg|flac|m4a)$/i.test(n) ? `<audio src="${u}" controls class="w-full"></audio>`
+      : /\.pdf$/i.test(n) ? `<iframe src="${u}" class="w-full h-[70vh] bg-white"></iframe>` : `<img src="${u}" class="max-w-full max-h-[70vh] mx-auto">`;
+    return openModal(n, body + `<div class="flex justify-end mt-3"><a class="btn btn-g" href="${dlUrl(p)}">⬇ Download</a></div>`);
+  }
+  const f = files.entries.find(e => fJoin(files.path, e.name) === p);
+  if (TEXT_EXT.test(n) || (f && f.size < 262144)) return fEdit(p);
+  location.href = dlUrl(p);
+}
+async function fEdit(p) {
+  let r; try { r = await api('/api/files/read?path=' + encodeURIComponent(p)); } catch (e) { toast(e.message, 'err'); if (/binary|2MB/.test(e.message)) location.href = dlUrl(p); return; }
+  openModal(p, `<textarea id="fText" class="inp font-mono text-xs w-full" rows="24" spellcheck="false"></textarea>
+    <div class="flex justify-between items-center mt-3"><span class="text-xs text-slate-500">Ctrl+S saves</span><div class="flex gap-2"><a class="btn btn-g" href="${dlUrl(p)}">⬇ Download</a><button class="btn btn-g" onclick="closeModal()">Close</button><button id="fSave" class="btn btn-p">Save</button></div></div>`);
+  $('#fText').value = r.content;
+  const save = () => guard(async () => { await post('/api/files/write', { path: p, content: $('#fText').value }); toast('Saved'); openDir(files.path); }, $('#fSave'));
+  $('#fSave').onclick = save;
+  $('#fText').onkeydown = e => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); } if (e.key === 'Tab') { e.preventDefault(); document.execCommand('insertText', false, '  '); } };
+}
+function fMenu(p, dir) {
+  const e = files.entries.find(x => fJoin(files.path, x.name) === p) || {};
+  openModal(p.split('/').pop() || '/', `<div class="space-y-3 text-sm"><div class="font-mono text-xs text-slate-400 break-all">${esc(p)}</div>
+    <div class="flex flex-wrap gap-2">
+      ${dir ? `<button class="btn btn-g" onclick="closeModal();openDir(${jq(p)})">📂 Open</button>` : `<button class="btn btn-g" onclick="fEdit(${jq(p)})">✏️ Edit</button>`}
+      <a class="btn btn-g" href="${dlUrl(p)}">⬇ Download${dir ? ' as .zip' : ''}</a>
+      <button class="btn btn-g" onclick="fRename(${jq(p)})">Rename</button>
+      <button class="btn btn-g" onclick="fMoveDlg([${jq(p)}])">Move / copy</button>
+      <button class="btn btn-d" onclick="fDelete([${jq(p)}])">Delete</button></div>
+    <div class="grid grid-cols-2 gap-2"><label>Permissions<input id="fMode" class="inp mt-1 font-mono" value="${esc(e.mode || '')}"></label><label>Owner (user or user:group)<input id="fOwn" class="inp mt-1 font-mono" placeholder="${esc(e.owner || '')}"></label></div>
+    <div class="flex justify-end"><button class="btn btn-g" onclick="fChmod(${jq(p)})">Apply permissions</button></div></div>`);
+}
+async function fRename(p) {
+  const old = p.split('/').pop(); const n = prompt('New name', old); if (!n || n === old) return;
+  await guard(async () => { await post('/api/files/move', { src: p, dest: fJoin(files.path, n) }); closeModal(); openDir(files.path); });
+}
+function fMoveDlg(paths) {
+  openModal(`Move or copy ${paths.length} item(s)`, `<div class="space-y-3 text-sm"><label class="block">To folder<input id="fDest" class="inp mt-1 font-mono" value="${esc(files.path)}"></label>
+    <div class="flex justify-end gap-2"><button class="btn btn-g" onclick="closeModal()">Cancel</button><button id="fCopyGo" class="btn btn-g">Copy</button><button id="fMoveGo" class="btn btn-p">Move</button></div></div>`);
+  const go = copy => guard(async () => { const d = $('#fDest').value.trim(); $('#fProgress').textContent = (copy ? 'Copying' : 'Moving') + '...'; closeModal();
+    try { for (const s of paths) await post('/api/files/move', { src: s, dest: d, duplicate: copy }); toast(copy ? 'Copied' : 'Moved'); } finally { $('#fProgress').textContent = ''; openDir(files.path); } });
+  $('#fCopyGo').onclick = () => go(true); $('#fMoveGo').onclick = () => go(false);
+}
+async function fDelete(paths) {
+  if (!confirm(`Delete ${paths.length === 1 ? paths[0] : paths.length + ' items'}? This cannot be undone.`)) return;
+  await guard(async () => { await post('/api/files/delete', { paths }); closeModal(); toast('Deleted'); openDir(files.path); });
+}
+async function fChmod(p) { await guard(async () => { await post('/api/files/chmod', { path: p, mode: $('#fMode').value.trim(), owner: $('#fOwn').value.trim() }); toast('Permissions updated'); closeModal(); openDir(files.path); }); }
+async function fUploadFiles(list) {
+  for (const f of list) {
+    await new Promise(res => {
+      const x = new XMLHttpRequest();
+      x.open('PUT', `/api/files/upload?dir=${encodeURIComponent(files.path)}&name=${encodeURIComponent(f.name)}`);
+      x.setRequestHeader('X-Requested-With', 'aipanel');
+      x.upload.onprogress = e => { $('#fProgress').textContent = `Uploading ${f.name}: ${Math.round(100 * e.loaded / e.total)}%`; };
+      x.onload = () => { if (x.status >= 300) toast(`${f.name}: ${x.responseText}`, 'err'); res(); };
+      x.onerror = () => { toast(`${f.name}: upload failed`, 'err'); res(); };
+      x.send(f);
+    });
+  }
+  $('#fProgress').textContent = ''; toast(`Uploaded ${list.length} file(s)`); openDir(files.path);
+}
+$('#fUpload').onchange = e => { if (e.target.files.length) fUploadFiles([...e.target.files]); e.target.value = ''; };
+$('#fDrop').addEventListener('dragover', e => { e.preventDefault(); $('#fDrop').classList.add('ring-2', 'ring-sky-500'); });
+$('#fDrop').addEventListener('dragleave', () => $('#fDrop').classList.remove('ring-2', 'ring-sky-500'));
+$('#fDrop').addEventListener('drop', e => { e.preventDefault(); $('#fDrop').classList.remove('ring-2', 'ring-sky-500'); if (e.dataTransfer.files.length) fUploadFiles([...e.dataTransfer.files]); });
+$('#fUp').onclick = () => openDir(files.path.replace(/\/[^/]+\/?$/, '') || '/');
+$('#fRefresh').onclick = () => openDir(files.path);
+$('#fPath').onkeydown = e => { if (e.key === 'Enter') openDir($('#fPath').value.trim()); };
+$('#fHidden').onchange = renderFiles;
+$('#fAll').onchange = e => { $$('.fSel').forEach(cb => { cb.checked = e.target.checked; e.target.checked ? files.sel.add(cb.dataset.p) : files.sel.delete(cb.dataset.p); }); fSelUpdate(); };
+$('#fSelDel').onclick = () => fDelete([...files.sel]);
+$('#fSelMove').onclick = () => fMoveDlg([...files.sel]);
+$('#fNewDir').onclick = async () => { const n = prompt('Folder name'); if (n) await guard(async () => { await post('/api/files/mkdir', { path: fJoin(files.path, n) }); openDir(files.path); }); };
+$('#fNewFile').onclick = async () => { const n = prompt('File name'); if (n) await guard(async () => { await post('/api/files/write', { path: fJoin(files.path, n), content: '' }); await openDir(files.path); fEdit(fJoin(files.path, n)); }); };
+function openAppFiles(id) { closeModal(); showTab('files'); setTimeout(() => openDir((files.base['App data'] || '/opt/ai-panel/data') + '/' + id), 200); }
 function appMenu(id) {
   const a = appsCache.find(x => x.id === id);
   openModal(a.name, `<div class="space-y-3">
@@ -733,6 +907,7 @@ function appMenu(id) {
       <button class="btn btn-g" onclick="appAction('${id}','restart');closeModal()">↻ Restart</button>
       <button class="btn btn-g" onclick="appLogs('${id}')">📜 Logs</button>
       <button class="btn btn-g" onclick="appSecrets('${id}')">🔑 Secrets</button>
+      <button class="btn btn-g" onclick="openAppFiles('${id}')">📁 Files</button>
       <button class="btn btn-g" onclick="installDialog('${id}')">⚙ Reconfigure</button>
       <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)}? Data is kept.')){appAction('${id}','uninstall');closeModal()}">Uninstall</button>
       <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)} AND DELETE ALL ITS DATA? This cannot be undone.')){appAction('${id}','uninstall',true);closeModal()}">Uninstall + delete data</button>
