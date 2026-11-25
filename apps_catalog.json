@@ -393,6 +393,332 @@
       "website": "https://about.gitea.com"
     },
     {
+      "id": "invokeai",
+      "name": "InvokeAI",
+      "category": "Create",
+      "icon": "🖌️",
+      "port": 9090,
+      "description": "Professional AI image studio: canvas, inpainting, upscaling, SDXL and Flux, with a model manager.",
+      "compose": "services:\n  invokeai:\n    image: ghcr.io/invoke-ai/invokeai:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:9090\"\n    environment:\n      INVOKEAI_ROOT: /invokeai\n    volumes:\n      - ${DATA_DIR}/invokeai:/invokeai\n",
+      "gpu": {
+        "services": [
+          "invokeai"
+        ],
+        "images": {
+          "nvidia": "ghcr.io/invoke-ai/invokeai:latest",
+          "amd": "ghcr.io/invoke-ai/invokeai:main-rocm"
+        }
+      },
+      "website": "https://invoke.ai",
+      "notes": "Install starter models from the Model Manager inside the app. SDXL needs about 8GB VRAM, Flux about 12 to 24GB."
+    },
+    {
+      "id": "fooocus",
+      "name": "Fooocus",
+      "category": "Create",
+      "icon": "✨",
+      "port": 7865,
+      "description": "Simple Midjourney-style image creator: type a prompt, get great SDXL images. Very beginner friendly.",
+      "compose": "services:\n  fooocus:\n    image: ghcr.io/lllyasviel/fooocus:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:7865\"\n    environment:\n      CMDARGS: --listen\n      DATADIR: /content/data\n      config_path: /content/data/config.txt\n      config_example_path: /content/data/config_modification_tutorial.txt\n      path_checkpoints: /content/data/models/checkpoints/\n      path_loras: /content/data/models/loras/\n      path_outputs: /content/app/outputs/\n    volumes:\n      - ${DATA_DIR}/data:/content/data\n      - ${DATA_DIR}/outputs:/content/app/outputs\n",
+      "gpu": {
+        "services": [
+          "fooocus"
+        ]
+      },
+      "website": "https://github.com/lllyasviel/Fooocus",
+      "notes": "NVIDIA GPU with 6GB+ VRAM recommended. The first start downloads about 7GB of models."
+    },
+    {
+      "id": "moneyprinter",
+      "name": "MoneyPrinterTurbo",
+      "category": "Create",
+      "icon": "🎞️",
+      "port": 8501,
+      "description": "Auto-create short videos from a topic: AI writes the script, adds stock footage, voice-over, subtitles and music.",
+      "compose": "services:\n  webui:\n    image: ghcr.io/harry0703/moneyprinterturbo:latest\n    restart: unless-stopped\n    network_mode: host\n    command: [\"streamlit\", \"run\", \"./webui/Main.py\", \"--server.address=0.0.0.0\", \"--server.port=${APP_PORT}\", \"--browser.gatherUsageStats=False\"]\n    volumes:\n      - ${DATA_DIR}/config.toml:/MoneyPrinterTurbo/config.toml\n      - ${DATA_DIR}/storage:/MoneyPrinterTurbo/storage\n",
+      "seed_files": {
+        "config.toml": "https://raw.githubusercontent.com/harry0703/MoneyPrinterTurbo/main/config.example.toml"
+      },
+      "website": "https://github.com/harry0703/MoneyPrinterTurbo",
+      "notes": "In the web UI choose LLM provider Ollama (base URL http://127.0.0.1:11434/v1, model e.g. qwen3:8b) or an online API, and add a free Pexels API key for stock video clips."
+    },
+    {
+      "id": "whisper",
+      "name": "Whisper (speech to text)",
+      "category": "Create",
+      "icon": "🎙️",
+      "port": 9000,
+      "description": "Transcribe audio/video and make subtitles (SRT/VTT) in 90+ languages. API with a test page at /docs.",
+      "compose": "services:\n  whisper:\n    image: onerahmet/openai-whisper-asr-webservice:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:9000\"\n    environment:\n      ASR_ENGINE: faster_whisper\n      ASR_MODEL: small\n    volumes:\n      - ${DATA_DIR}/cache:/root/.cache\n",
+      "gpu": {
+        "services": [
+          "whisper"
+        ],
+        "images": {
+          "nvidia": "onerahmet/openai-whisper-asr-webservice:latest-gpu"
+        }
+      },
+      "path": "/docs",
+      "website": "https://ahmetoner.com/whisper-asr-webservice/",
+      "notes": "Open WebUI and n8n can use it for voice input. Change ASR_MODEL (tiny, base, small, medium, large-v3) by editing the compose file."
+    },
+    {
+      "id": "kokoro-tts",
+      "name": "Kokoro TTS (AI voice)",
+      "category": "Create",
+      "icon": "🗣️",
+      "port": 8880,
+      "description": "Natural text-to-speech voices with a web UI at /web and an OpenAI-compatible API for Open WebUI and video tools.",
+      "compose": "services:\n  kokoro:\n    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8880\"\n",
+      "gpu": {
+        "services": [
+          "kokoro"
+        ],
+        "images": {
+          "nvidia": "ghcr.io/remsky/kokoro-fastapi-gpu:latest"
+        }
+      },
+      "path": "/web",
+      "website": "https://github.com/remsky/Kokoro-FastAPI",
+      "notes": "In Open WebUI: Settings > Audio > TTS = OpenAI, URL http://localhost:8880/v1, key 'not-needed'."
+    },
+    {
+      "id": "libretranslate",
+      "name": "LibreTranslate",
+      "category": "Create",
+      "icon": "🌍",
+      "port": 5000,
+      "description": "Private machine translation for 30+ languages (web UI and API).",
+      "compose": "services:\n  libretranslate:\n    image: libretranslate/libretranslate:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:5000\"\n    volumes:\n      - ${DATA_DIR}/models:/home/libretranslate/.local\n",
+      "gpu": {
+        "services": [
+          "libretranslate"
+        ],
+        "images": {
+          "nvidia": "libretranslate/libretranslate:latest-cuda"
+        }
+      },
+      "chown": {
+        "uid": 1032,
+        "dirs": [
+          "models"
+        ]
+      },
+      "website": "https://libretranslate.com"
+    },
+    {
+      "id": "kdenlive",
+      "name": "Kdenlive (video editor)",
+      "category": "Studio",
+      "icon": "🎬",
+      "port": 3010,
+      "description": "Full non-linear video editor: timeline, effects, titles, transitions, 4K export. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  kdenlive:\n    image: linuxserver/kdenlive:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://kdenlive.org",
+      "gpu": {
+        "services": [
+          "kdenlive"
+        ]
+      },
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "shotcut",
+      "name": "Shotcut (video editor)",
+      "category": "Studio",
+      "icon": "✂️",
+      "port": 3011,
+      "description": "Easy free video editor with filters, audio mixing and wide format support. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  shotcut:\n    image: linuxserver/shotcut:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://shotcut.org",
+      "gpu": {
+        "services": [
+          "shotcut"
+        ]
+      },
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "openshot",
+      "name": "OpenShot (video editor)",
+      "category": "Studio",
+      "icon": "📽️",
+      "port": 3012,
+      "description": "Simple video editor with animations, titles and keyframes. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  openshot:\n    image: linuxserver/openshot:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://www.openshot.org",
+      "gpu": null,
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "blender",
+      "name": "Blender (3D & video)",
+      "category": "Studio",
+      "icon": "🧊",
+      "port": 3013,
+      "description": "3D modeling, animation, rendering and video editing. GPU rendering with Cycles. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  blender:\n    image: linuxserver/blender:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://www.blender.org",
+      "gpu": {
+        "services": [
+          "blender"
+        ]
+      },
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "gimp",
+      "name": "GIMP (photo editor)",
+      "category": "Studio",
+      "icon": "🖼️",
+      "port": 3014,
+      "description": "Powerful photo editing and retouching, a free Photoshop alternative. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  gimp:\n    image: linuxserver/gimp:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://www.gimp.org",
+      "gpu": null,
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "krita",
+      "name": "Krita (digital painting)",
+      "category": "Studio",
+      "icon": "🎨",
+      "port": 3015,
+      "description": "Digital painting, illustration and comics. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  krita:\n    image: linuxserver/krita:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://krita.org",
+      "gpu": null,
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "darktable",
+      "name": "darktable (RAW photos)",
+      "category": "Studio",
+      "icon": "📸",
+      "port": 3016,
+      "description": "Professional RAW photo development and photo workflow, like Lightroom. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  darktable:\n    image: linuxserver/darktable:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://www.darktable.org",
+      "gpu": null,
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "digikam",
+      "name": "digiKam (photo manager)",
+      "category": "Studio",
+      "icon": "🗃️",
+      "port": 3017,
+      "description": "Organize huge photo collections with tags, face recognition and editing. Runs as a full desktop app inside your browser.",
+      "compose": "services:\n  digikam:\n    image: linuxserver/digikam:latest\n    restart: unless-stopped\n    shm_size: \"1gb\"\n    security_opt:\n      - seccomp:unconfined\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      CUSTOM_USER: admin\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://www.digikam.org",
+      "gpu": null,
+      "notes": "Login: admin / the PASSWORD in Settings > App secrets. Files in /media are shared between all Studio apps (/opt/ai-panel/data/shared-media on the server)."
+    },
+    {
+      "id": "handbrake",
+      "name": "HandBrake (video converter)",
+      "category": "Studio",
+      "icon": "🔄",
+      "port": 5800,
+      "description": "Convert and compress videos to MP4/MKV with presets for phones, web and TVs. Has a watch folder.",
+      "compose": "services:\n  handbrake:\n    image: jlesage/handbrake:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:5800\"\n    environment:\n      TZ: ${TZ}\n      USER_ID: \"1000\"\n      GROUP_ID: \"1000\"\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/storage\n      - ${DATA_DIR}/watch:/watch\n      - ${DATA_DIR}/output:/output\n",
+      "gpu": {
+        "services": [
+          "handbrake"
+        ]
+      },
+      "website": "https://handbrake.fr",
+      "notes": "Drop files in /opt/ai-panel/data/handbrake/watch to convert automatically; results go to .../output."
+    },
+    {
+      "id": "photoprism",
+      "name": "PhotoPrism",
+      "category": "Media",
+      "icon": "🌄",
+      "port": 2342,
+      "description": "AI-powered photo library: auto-tagging, face recognition, places map, and duplicates finder.",
+      "compose": "services:\n  photoprism:\n    image: photoprism/photoprism:latest\n    restart: unless-stopped\n    security_opt:\n      - seccomp:unconfined\n      - apparmor:unconfined\n    ports:\n      - \"${APP_PORT}:2342\"\n    environment:\n      PHOTOPRISM_ADMIN_USER: admin\n      PHOTOPRISM_ADMIN_PASSWORD: ${ADMIN_PASSWORD}\n      PHOTOPRISM_SITE_URL: http://${HOST_IP}:${APP_PORT}/\n      PHOTOPRISM_DATABASE_DRIVER: sqlite\n      PHOTOPRISM_ORIGINALS_LIMIT: \"5000\"\n    working_dir: /photoprism\n    volumes:\n      - ${DATA_DIR}/originals:/photoprism/originals\n      - ${DATA_DIR}/storage:/photoprism/storage\n",
+      "env": {
+        "ADMIN_PASSWORD": "{{random}}"
+      },
+      "gpu": {
+        "services": [
+          "photoprism"
+        ]
+      },
+      "website": "https://www.photoprism.app",
+      "notes": "Login: admin / ADMIN_PASSWORD from Settings > App secrets. Put photos in /opt/ai-panel/data/photoprism/originals and click Library > Index."
+    },
+    {
+      "id": "stirling-pdf",
+      "name": "Stirling PDF",
+      "category": "Tools",
+      "icon": "📄",
+      "port": 8092,
+      "description": "Do anything with PDFs: merge, split, compress, convert, OCR, sign, all locally.",
+      "compose": "services:\n  stirling-pdf:\n    image: stirlingtools/stirling-pdf:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8080\"\n    volumes:\n      - ${DATA_DIR}/configs:/configs\n      - ${DATA_DIR}/tessdata:/usr/share/tessdata\n",
+      "website": "https://stirlingpdf.com"
+    },
+    {
+      "id": "paperless-ngx",
+      "name": "Paperless-ngx",
+      "category": "Tools",
+      "icon": "🗂️",
+      "port": 8095,
+      "description": "Scan, OCR and auto-organize all your paper documents into a searchable archive.",
+      "compose": "services:\n  webserver:\n    image: ghcr.io/paperless-ngx/paperless-ngx:latest\n    restart: unless-stopped\n    depends_on:\n      - broker\n    ports:\n      - \"${APP_PORT}:8000\"\n    environment:\n      PAPERLESS_REDIS: redis://broker:6379\n      PAPERLESS_SECRET_KEY: ${SECRET_KEY}\n      PAPERLESS_ADMIN_USER: admin\n      PAPERLESS_ADMIN_PASSWORD: ${ADMIN_PASSWORD}\n      PAPERLESS_URL: http://${HOST_IP}:${APP_PORT}\n      PAPERLESS_TIME_ZONE: ${TZ}\n      PAPERLESS_OCR_LANGUAGE: eng\n    volumes:\n      - ${DATA_DIR}/data:/usr/src/paperless/data\n      - ${DATA_DIR}/media:/usr/src/paperless/media\n      - ${DATA_DIR}/consume:/usr/src/paperless/consume\n      - ${DATA_DIR}/export:/usr/src/paperless/export\n  broker:\n    image: docker.io/library/redis:7\n    restart: unless-stopped\n    volumes:\n      - ${DATA_DIR}/redis:/data\n",
+      "env": {
+        "SECRET_KEY": "{{random_hex}}",
+        "ADMIN_PASSWORD": "{{random}}"
+      },
+      "website": "https://docs.paperless-ngx.com",
+      "notes": "Login: admin / ADMIN_PASSWORD from Settings > App secrets. Drop scans into /opt/ai-panel/data/paperless-ngx/consume."
+    },
+    {
+      "id": "it-tools",
+      "name": "IT-Tools",
+      "category": "Tools",
+      "icon": "🧰",
+      "port": 8093,
+      "description": "80+ handy developer tools: converters, generators, QR codes, hashes, network calculators.",
+      "compose": "services:\n  it-tools:\n    image: corentinth/it-tools:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n",
+      "website": "https://it-tools.tech"
+    },
+    {
+      "id": "excalidraw",
+      "name": "Excalidraw",
+      "category": "Tools",
+      "icon": "✏️",
+      "port": 8094,
+      "description": "Hand-drawn style whiteboard for diagrams, sketches and planning.",
+      "compose": "services:\n  excalidraw:\n    image: excalidraw/excalidraw:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n",
+      "website": "https://excalidraw.com"
+    },
+    {
       "id": "home-assistant",
       "name": "Home Assistant",
       "category": "Home",

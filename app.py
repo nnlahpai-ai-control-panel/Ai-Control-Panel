@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"
@@ -239,7 +239,17 @@ def run_quick(cmd: list[str], timeout: int = 10) -> tuple[int, str]:
 # --------------------------------------------------------------------------------------
 # App
 # --------------------------------------------------------------------------------------
-app = FastAPI(title="AI Server Control Panel", version=VERSION, docs_url=None, redoc_url=None)
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    task = asyncio.create_task(sampler_loop())  # system-monitor sampler (defined below)
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="AI Server Control Panel", version=VERSION, docs_url=None, redoc_url=None, lifespan=lifespan)
 
 @app.exception_handler(httpx.HTTPError)
 async def httpx_error(request: Request, exc: httpx.HTTPError):
@@ -645,9 +655,6 @@ async def sampler_loop() -> None:
         await asyncio.sleep(5)
 
 
-@app.on_event("startup")
-async def _start_sampler():
-    asyncio.create_task(sampler_loop())
 
 
 def cpu_temp() -> Optional[float]:
@@ -1733,6 +1740,20 @@ async def install_app(app_id: str, body: InstallBody):
     t = new_task("app", f"Install {a.get('name', app_id)}")
 
     async def run():
+        # seed config files the app expects to exist (downloaded once, never overwritten)
+        for rel, url in (a.get("seed_files") or {}).items():
+            dest = (DATA_DIR / app_id / rel).resolve()
+            if not str(dest).startswith(str((DATA_DIR / app_id).resolve()) + "/") or dest.exists():
+                continue
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+                    r = await c.get(url)
+                    r.raise_for_status()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(r.content)
+                task_log(t, f"Created {rel}")
+            except Exception as e:
+                task_log(t, f"Could not download {rel}: {e}")
         task_log(t, "Pulling images (this can take a while)...")
         rc = await run_cmd(t, compose_cmd(app_id) + ["pull"])
         if rc != 0:

@@ -14,7 +14,7 @@ sudo bash install_app.sh
 | | |
 |---|---|
 | ![AI models](docs/screenshots/llama-cpp.png) | ![App Store](docs/screenshots/app-store.png) |
-| **llama.cpp mixed-GPU pool**: NVIDIA + AMD + Intel in one model | **1-click App Store**: 28 apps with GPU passthrough |
+| **llama.cpp mixed-GPU pool**: NVIDIA + AMD + Intel in one model | **1-click App Store**: 48 apps with GPU passthrough |
 | ![GPU pools](docs/screenshots/gpu-pools.png) | ![Terminal](docs/screenshots/terminal.png) |
 | **GPU pools**: e.g. "AI" cards vs "Media" cards | **Browser terminal**: full root shell, no SSH |
 
@@ -50,7 +50,7 @@ Drive health uses `smartmontools`, and RAM stick details use `dmidecode`. The in
 |---|---|
 | `install_app.sh` | 1-step installer and upgrader (Docker, NVIDIA toolkit, Ollama, llama.cpp Vulkan, systemd) |
 | `app.py` | FastAPI backend (auth, Ollama, llama.cpp, App Store, GPU stats, WebSocket terminal, updates) |
-| `apps_catalog.json` | 28 one-click apps |
+| `apps_catalog.json` | 48 one-click apps |
 | `index.html` | Dark-mode single-page dashboard |
 | `static/` | Tailwind CSS and xterm.js served locally, so the panel works without internet in the browser |
 
@@ -185,3 +185,16 @@ Reset a forgotten password:
 * **Cloudflare Tunnel:** paste the tunnel token. In Cloudflare, point each public hostname at `http://localhost:<app port>`.
 * **InvoicePlane:** finish the web setup wizard. The database host is `db`, and the credentials are in App secrets.
 * **Vaultwarden:** browsers require HTTPS, so publish it through Cloudflare Tunnel or Nginx Proxy Manager.
+* **Studio apps (Kdenlive, Shotcut, OpenShot, Blender, GIMP, Krita, darktable, digiKam):** these are full desktop apps that run in your browser. Log in as `admin`, and find the password in App secrets. They all share the folder `/opt/ai-panel/data/shared-media` (shown as `/media` inside the app), so a video you render in one opens in another.
+* **MoneyPrinterTurbo:** add your LLM and stock-video API keys in its settings page. To keep it fully local, point the LLM at Ollama (`http://<server-ip>:11434`).
+
+## Creative apps
+
+| Group | Apps |
+|---|---|
+| **AI image** | ComfyUI (also makes AI video), InvokeAI, Fooocus |
+| **Auto video** | MoneyPrinterTurbo: give it a topic and it writes the script, adds voice, subtitles and stock clips, then renders a short video |
+| **Voice and text** | Whisper (speech to text and subtitles), Kokoro TTS (text to speech), LibreTranslate |
+| **Video editing** | Kdenlive, Shotcut, OpenShot, HandBrake (convert and compress) |
+| **Photo and 3D** | GIMP, Krita, darktable, digiKam, PhotoPrism, Blender |
+| **Handy tools** | Stirling PDF, Paperless-ngx, IT-Tools, Excalidraw |
