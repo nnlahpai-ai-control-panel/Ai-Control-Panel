@@ -59,6 +59,27 @@ Tips for a good pool:
 * Each card draws 150 to 450W. Size the power supply for all cards at full load plus 20%.
 * Above 6 cards, expect more setup trouble (BIOS "Above 4G decoding" and "Resizable BAR", riser stability) and smaller speed gains per card.
 
+### Multiple GPU pools (for example "AI" and "Media")
+
+You can split your cards into named groups so that different work runs on different GPUs. For example:
+
+| Pool | GPUs | Used by |
+|---|---|---|
+| **AI** | RTX 3060 12GB + RX 6800 16GB (28GB) | llama.cpp, Ollama, ComfyUI |
+| **Media** | RTX 3070 8GB | Jellyfin transcoding, Immich face/photo AI |
+
+How to set it up:
+1. **GPU & System tab > GPU pools:** add a pool, tick its GPUs and click **Save pools**. Any number of pools works, and a GPU can be in more than one pool.
+2. **AI Models > llama.cpp:** choose the pool in **GPU pool**, then click Start / Restart. The model splits only across that pool's cards.
+3. **AI Models > Ollama:** choose the pool and click **Apply**. Ollama restarts and uses only those cards.
+4. **App Store:** when you install a GPU app (or use ⋯ > Reconfigure), pick its **GPU pool**. Only that pool's cards are passed into the container.
+
+Notes:
+* GPUs are tracked by PCI slot, so pools stay correct after reboots, but update them if you move a card to another slot.
+* "All GPUs" (no pool) is the default everywhere.
+* A container uses one vendor, so for a mixed pool the app picks NVIDIA or AMD cards (the GPU passthrough option).
+* After changing a pool's members, restart llama.cpp, click Apply for Ollama again, and Reconfigure the apps that use it.
+
 ## Getting models and apps in
 
 * **Ollama:** 1-click library, or type any name (`qwen3:14b`, `hf.co/user/repo`). You can also turn any local GGUF into an Ollama model with the "→ Ollama" button.

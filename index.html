@@ -92,6 +92,17 @@
       </div>
       <div id="gpuCards" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></div>
       <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" id="sysCards"></div>
+      <div class="card p-5">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div>
+            <h2 class="text-lg font-bold">GPU pools</h2>
+            <p class="text-sm text-slate-400">Split your cards into groups, e.g. <b>AI</b> for llama.cpp/Ollama and <b>Media</b> for Jellyfin/Immich. Then pick a pool in AI Models or when installing an app. No pool = all GPUs.</p>
+          </div>
+          <div class="flex gap-2"><input id="newPool" class="inp !w-40" placeholder="New pool name"><button id="addPool" class="btn btn-g">＋ Add pool</button></div>
+        </div>
+        <div id="poolEditor" class="mt-4 overflow-x-auto"></div>
+        <div class="mt-3 flex gap-2 items-center"><button id="savePools" class="btn btn-p">Save pools</button><span id="poolMsg" class="text-sm text-slate-400"></span></div>
+      </div>
     </section>
 
     <!-- ---------- MODELS ---------- -->
@@ -107,6 +118,7 @@
             <div>
               <h2 class="text-lg font-bold">Installed Ollama models</h2>
               <p id="ollamaStatus" class="text-sm text-slate-400"></p>
+              <div class="flex gap-2 items-center mt-2 text-sm">GPU pool <select id="oPool" class="inp !w-48 !py-1 poolSel"></select><button id="oPoolApply" class="btn btn-g !py-1">Apply (restarts Ollama)</button></div>
             </div>
             <div class="flex gap-2 flex-wrap">
               <input id="pullName" class="inp !w-64" placeholder="Any model, e.g. qwen3:14b or hf.co/user/repo">
@@ -149,6 +161,7 @@
             <label>Devices (blank = all)<input id="lDev" class="inp mt-1" placeholder="Vulkan0,Vulkan1"></label>
             <label>Listen on<select id="lHost" class="inp mt-1"><option value="127.0.0.1">This server only (127.0.0.1)</option><option value="0.0.0.0">Whole network (0.0.0.0)</option></select></label>
             <label>Port<input id="lPort" type="number" class="inp mt-1"></label>
+            <label>GPU pool<select id="lPool" class="inp mt-1 poolSel"></select></label>
             <label class="md:col-span-2">Extra arguments<input id="lExtra" class="inp mt-1" placeholder="--flash-attn auto -t 8"></label>
           </div>
           <div class="mt-3 flex gap-2"><button id="lSave" class="btn btn-p">Save settings</button><span id="lSaved" class="text-sm text-green-400 self-center"></span></div>
@@ -313,8 +326,8 @@ function showTab(t) {
   currentTab = t; history.replaceState(null, '', '#' + t);
   $$('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
   $$('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + t));
-  if (t === 'dash') loadStats();
-  if (t === 'models') { loadOllama(); loadLlama(); }
+  if (t === 'dash') { loadStats(); loadPools(); }
+  if (t === 'models') { loadPoolOptions(); loadOllama(); loadLlama(); }
   if (t === 'apps') loadApps();
   if (t === 'term') openTerminal();
   if (t === 'settings') loadSettings();
@@ -350,7 +363,8 @@ async function loadStats() {
     return `<div class="card p-4">
       <div class="flex justify-between items-start gap-2">
         <div class="min-w-0"><div class="text-xs font-bold" style="color:${vendorColor[g.vendor]}">GPU ${g.index} · ${esc(g.vendor)}</div>
-        <div class="font-semibold truncate" title="${esc(g.name)}">${esc(g.name)}</div></div>
+        <div class="font-semibold truncate" title="${esc(g.name)}">${esc(g.name)}</div>
+        <div class="flex gap-1 flex-wrap mt-1">${(g.pools || []).map(p => `<span class="pill bg-ink-700 text-accent-400">${esc(p)}</span>`).join('')}</div></div>
         <div class="text-right"><div class="text-2xl font-bold ${g.temp > 83 ? 'text-red-400' : ''}">${g.temp != null ? Math.round(g.temp) + '°' : '–'}</div><div class="text-xs text-slate-500">${g.power_w != null ? Math.round(g.power_w) + ' W' : ''}</div></div>
       </div>
       <div class="mt-3 text-sm flex justify-between"><span class="text-slate-400">VRAM</span><span>${((g.vram_used_mb || 0) / 1024).toFixed(1)} / ${((g.vram_total_mb || 0) / 1024).toFixed(1)} GB</span></div>
@@ -475,13 +489,14 @@ async function loadLlama() {
   const models = await api('/api/llama/models').catch(() => []);
   $('#lModel').innerHTML = '<option value="">— choose a GGUF —</option>' + models.map(m => `<option value="${esc(m.name)}" ${m.name === c.model ? 'selected' : ''}>${esc(m.name)} (${gb(m.size)} GB${m.shards > 1 ? `, ${m.shards} parts` : ''})</option>`).join('');
   $('#lCtx').value = c.ctx; $('#lNgl').value = c.ngl; $('#lSplit').value = c.split_mode; $('#lTs').value = c.tensor_split;
+  await loadPoolOptions(); $('#lPool').value = c.pool || '';
   $('#lDev').value = c.devices; $('#lHost').value = c.host; $('#lPort').value = c.port; $('#lExtra').value = c.extra;
   $('#ggufList').innerHTML = models.map(m => `<div class="py-2 flex items-center gap-3 text-sm">
     <div class="flex-1 min-w-0"><div class="truncate font-medium">${esc(m.name)}</div><div class="text-xs text-slate-400">${gb(m.size)} GB ${m.size / 1048576 > tot && tot ? '<span class="text-amber-400">· larger than GPU pool, rest goes to RAM</span>' : ''}</div></div>
     <button class="btn btn-g" onclick="importToOllama('${esc(m.name)}')">→ Ollama</button>
     <button class="btn btn-d" onclick="deleteGguf('${esc(m.name)}')">Delete</button></div>`).join('') || '<p class="text-sm text-slate-500 py-2">No GGUF files yet. Download one below.</p>';
 }
-function llamaBody() { return { model: $('#lModel').value, ctx: +$('#lCtx').value, ngl: +$('#lNgl').value, split_mode: $('#lSplit').value, tensor_split: $('#lTs').value.trim() || 'auto', devices: $('#lDev').value.trim(), host: $('#lHost').value, port: +$('#lPort').value, extra: $('#lExtra').value }; }
+function llamaBody() { return { model: $('#lModel').value, ctx: +$('#lCtx').value, ngl: +$('#lNgl').value, split_mode: $('#lSplit').value, tensor_split: $('#lTs').value.trim() || 'auto', devices: $('#lDev').value.trim(), host: $('#lHost').value, port: +$('#lPort').value, extra: $('#lExtra').value, pool: $('#lPool').value }; }
 $('#lSave').onclick = e => guard(async () => { await post('/api/llama/config', llamaBody()); $('#lSaved').textContent = 'Saved ✓'; setTimeout(() => $('#lSaved').textContent = '', 2000); }, e.target);
 $('#llamaStart').onclick = e => guard(async () => { await post('/api/llama/config', llamaBody()); await post('/api/llama/service/start'); toast('llama-server starting... loading a big model can take a minute'); setTimeout(loadLlama, 3000); }, e.target);
 $('#llamaStop').onclick = e => guard(async () => { await post('/api/llama/service/stop'); loadLlama(); }, e.target);
@@ -529,7 +544,7 @@ function renderApps() {
     const url = appUrl(a);
     return `<div class="card p-4 flex flex-col">
       <div class="flex gap-3 items-start"><div class="text-3xl">${esc(a.icon || '📦')}</div>
-        <div class="min-w-0 flex-1"><div class="font-bold flex items-center gap-2 flex-wrap">${esc(a.name)} ${a.gpu ? '<span class="pill bg-violet-900 text-violet-200">GPU</span>' : ''}${a.custom ? '<span class="pill bg-ink-700">custom</span>' : ''}</div>
+        <div class="min-w-0 flex-1"><div class="font-bold flex items-center gap-2 flex-wrap">${esc(a.name)} ${a.gpu ? `<span class="pill bg-violet-900 text-violet-200">GPU${a.gpu_pool ? ' · ' + esc(poolName(a.gpu_pool)) : ''}</span>` : ''}${a.custom ? '<span class="pill bg-ink-700">custom</span>' : ''}</div>
         <div class="text-xs text-slate-500">${esc(a.category)}${a.port ? ' · port ' + a.port : ''}</div></div>
         ${a.installed ? `<span class="pill ${statusPill[a.status]}">${a.status}</span>` : ''}</div>
       <p class="text-sm text-slate-400 mt-2 flex-1">${esc(a.description)}</p>
@@ -544,9 +559,11 @@ function renderApps() {
   }).join('') || '<p class="text-slate-500">No apps match.</p>';
 }
 $('#appFilter').oninput = renderApps;
-function installDialog(id) {
+async function installDialog(id) {
+  await loadPoolOptions();
   const a = appsCache.find(x => x.id === id);
-  const gpuSel = a.gpu ? `<label class="block text-sm">GPU passthrough<select id="iGpu" class="inp mt-1">
+  const poolSel = a.gpu && Object.keys(poolsCache.pools || {}).length ? `<label class="block text-sm">GPU pool<select id="iPool" class="inp mt-1">${poolOptions(a.gpu_pool)}</select></label>` : '';
+  const gpuSel = a.gpu ? poolSel + `<label class="block text-sm">GPU passthrough<select id="iGpu" class="inp mt-1">
      <option value="auto">Auto (${gpuVendors.includes('nvidia') ? 'NVIDIA' : gpuVendors.includes('amd') ? 'AMD' : 'none found'})</option>
      <option value="nvidia">NVIDIA (CUDA)</option><option value="amd">AMD (ROCm)</option><option value="none">CPU only</option></select></label>` : '';
   openModal(`Install ${a.name}`, `<div class="space-y-3">
@@ -560,7 +577,7 @@ function installDialog(id) {
   api(`/api/apps/${id}/compose`).then(c => $('#iCompose').textContent = c.compose);
   $('#iGo').onclick = e => guard(async () => {
     const inputs = {}; $$('.iInput').forEach(i => inputs[i.dataset.key] = i.value);
-    const body = { inputs, gpu: $('#iGpu')?.value || 'auto' }; if ($('#iPort')) body.port = +$('#iPort').value;
+    const body = { inputs, gpu: $('#iGpu')?.value || 'auto', pool: $('#iPool')?.value || '' }; if ($('#iPort')) body.port = +$('#iPort').value;
     const { task } = await post(`/api/apps/${id}/install`, body); closeModal();
     $('#ap-' + id).innerHTML = progHtml(task); toast(`Installing ${a.name}...`);
     onTaskDone(task, loadApps);
@@ -610,6 +627,48 @@ $('#customBtn').onclick = () => {
   $('#cSave').onclick = e => guard(async () => { await save(); closeModal(); toast('Saved to App Store'); await loadApps(); }, e.target);
   $('#cSaveInstall').onclick = e => guard(async () => { await save(); const id = $('#cId').value.trim(); closeModal(); await loadApps(); const { task } = await post(`/api/apps/${id}/install`, {}); $('#ap-' + id).innerHTML = progHtml(task); onTaskDone(task, loadApps); }, e.target);
 };
+
+// ===================================================================== GPU pools
+let poolsCache = { pools: {}, gpus: [] };
+const poolName = id => (poolsCache.pools[id] || {}).name || id;
+function poolOptions(sel = '') {
+  return `<option value="">All GPUs</option>` + Object.entries(poolsCache.pools || {}).map(([id, p]) => `<option value="${esc(id)}" ${id === sel ? 'selected' : ''}>${esc(p.name)} (${p.gpus.length} GPU${p.gpus.length === 1 ? '' : 's'})</option>`).join('');
+}
+async function loadPoolOptions() {
+  try { poolsCache = await api('/api/pools'); } catch { return; }
+  $$('.poolSel').forEach(el => { const v = el.value; el.innerHTML = poolOptions(); el.value = v; });
+  $('#oPool').value = poolsCache.ollama_pool || '';
+}
+async function loadPools() { await loadPoolOptions(); renderPoolEditor(); }
+function renderPoolEditor() {
+  const ids = Object.keys(poolsCache.pools);
+  if (!poolsCache.gpus.length) { $('#poolEditor').innerHTML = '<p class="text-sm text-slate-500">No GPUs detected.</p>'; return; }
+  const vram = id => (poolsCache.gpus.filter(g => poolsCache.pools[id].gpus.includes(g.bus)).reduce((a, g) => a + (g.vram_total_mb || 0), 0) / 1024).toFixed(0);
+  $('#poolEditor').innerHTML = `<table class="text-sm w-full"><thead><tr class="text-left text-slate-400"><th class="py-1 pr-4">GPU</th>${ids.map(id => `<th class="px-3 text-center whitespace-nowrap">${esc(poolsCache.pools[id].name)} <button class="text-red-400 ml-1" title="Remove pool" onclick="dropPool('${esc(id)}')">✕</button></th>`).join('')}</tr></thead><tbody>` +
+    poolsCache.gpus.map(g => `<tr class="border-t border-ink-800"><td class="py-2 pr-4 whitespace-nowrap"><span style="color:${vendorColor[g.vendor]}">●</span> GPU ${g.index} · ${esc(g.name)} <span class="text-slate-500">${((g.vram_total_mb || 0) / 1024).toFixed(0)} GB · ${esc(g.bus)}</span></td>` +
+      ids.map(id => `<td class="text-center"><input type="checkbox" class="w-4 h-4 accent-sky-500" data-pool="${esc(id)}" data-bus="${esc(g.bus)}" ${poolsCache.pools[id].gpus.includes(g.bus) ? 'checked' : ''}></td>`).join('') + '</tr>').join('') +
+    `<tr class="border-t border-ink-800 text-slate-400"><td class="py-2">Pool VRAM</td>${ids.map(id => `<td class="text-center">${vram(id)} GB</td>`).join('')}</tr></tbody></table>` +
+    (ids.length ? '' : '<p class="text-sm text-slate-500 mt-2">No pools yet. Add one, for example "AI" or "Media".</p>');
+  $$('#poolEditor input[type=checkbox]').forEach(cb => cb.onchange = () => {
+    const p = poolsCache.pools[cb.dataset.pool];
+    p.gpus = cb.checked ? [...new Set([...p.gpus, cb.dataset.bus])] : p.gpus.filter(b => b !== cb.dataset.bus);
+    renderPoolEditor(); $('#poolMsg').textContent = 'Unsaved changes';
+  });
+}
+$('#addPool').onclick = () => {
+  const name = $('#newPool').value.trim(); if (!name) return;
+  const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || 'pool';
+  if (poolsCache.pools[id]) return toast('A pool with that name exists', 'err');
+  poolsCache.pools[id] = { name, gpus: [] }; $('#newPool').value = ''; renderPoolEditor(); $('#poolMsg').textContent = 'Unsaved changes';
+};
+function dropPool(id) {
+  poolsCache.pools = Object.fromEntries(Object.entries(poolsCache.pools).filter(([k]) => k !== id));
+  renderPoolEditor(); $('#poolMsg').textContent = 'Unsaved changes';
+}
+$('#savePools').onclick = e => guard(async () => {
+  const r = await post('/api/pools', { pools: poolsCache.pools }); $('#poolMsg').textContent = 'Saved ✓ ' + r.note; await loadPools(); loadStats();
+}, e.target);
+$('#oPoolApply').onclick = e => guard(async () => { const r = await post('/api/ollama/pool', { pool: $('#oPool').value }); toast(r.message || 'Done'); setTimeout(loadOllama, 3000); }, e.target);
 
 // ===================================================================== Terminal
 const term = { x: null, fit: null, ws: null };

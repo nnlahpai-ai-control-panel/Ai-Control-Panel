@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"
@@ -359,14 +359,14 @@ def _read(path: str) -> Optional[str]:
 def nvidia_gpus() -> list[dict]:
     if not shutil.which("nvidia-smi"):
         return []
-    rc, out = run_quick(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw,pci.bus_id",
+    rc, out = run_quick(["nvidia-smi", "--query-gpu=index,name,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw,pci.bus_id,uuid",
                          "--format=csv,noheader,nounits"], timeout=8)
     if rc != 0:
         return []
     gpus = []
     for line in out.strip().splitlines():
         p = [x.strip() for x in line.split(",")]
-        if len(p) < 8:
+        if len(p) < 9:
             continue
 
         def num(x):
@@ -375,7 +375,8 @@ def nvidia_gpus() -> list[dict]:
             except ValueError:
                 return None
         gpus.append({"vendor": "NVIDIA", "name": p[1], "vram_total_mb": num(p[2]), "vram_used_mb": num(p[3]),
-                     "util": num(p[4]), "temp": num(p[5]), "power_w": num(p[6]), "bus": p[7].lower()[-12:]})
+                     "util": num(p[4]), "temp": num(p[5]), "power_w": num(p[6]), "bus": p[7].lower()[-12:],
+                     "uuid": p[8], "nv_index": int(p[0])})
     return gpus
 
 
@@ -410,7 +411,11 @@ def sysfs_gpus() -> list[dict]:
             if v:
                 power = round(int(v) / 1_000_000, 1)
                 break
+        render = sorted(glob.glob(dev + "/drm/renderD*"))
+        uid = _read(dev + "/unique_id")
         gpus.append({"vendor": "AMD" if vendor == "0x1002" else "Intel", "name": name,
+                     "render": "/dev/dri/" + os.path.basename(render[0]) if render else None,
+                     "card": "/dev/dri/" + os.path.basename(card), "uuid": f"GPU-{uid}" if uid else None,
                      "vram_total_mb": int(total) / 1048576 if total else None,
                      "vram_used_mb": int(used) / 1048576 if used else None,
                      "util": float(busy) if busy else None, "temp": temp, "power_w": power, "bus": bus[-12:]})
@@ -433,12 +438,157 @@ def gpu_vendors() -> set[str]:
     return v
 
 
+_vk_cache: dict = {"t": 0, "map": {}}
+
+
+def vulkan_bus_map() -> dict[str, int]:
+    """PCI bus id ('0000:01:00.0') -> Vulkan physical-device index (what GGML_VK_VISIBLE_DEVICES uses)."""
+    if time.time() - _vk_cache["t"] < 120:
+        return _vk_cache["map"]
+    m: dict[str, int] = {}
+    if shutil.which("vulkaninfo"):
+        rc, out = run_quick(["vulkaninfo"], timeout=30)
+        cur = None
+        vals: dict[str, int] = {}
+        for line in out.splitlines():
+            g = re.match(r"^GPU(\d+):\s*$", line.strip())
+            if g:
+                cur, vals = int(g.group(1)), {}
+                continue
+            k = re.match(r"^\s*(pciDomain|pciBus|pciDevice|pciFunction)\s*=\s*(\S+)", line)
+            if k and cur is not None:
+                raw = k.group(2)
+                vals[k.group(1)] = int(raw, 16) if raw.lower().startswith("0x") else int(raw)
+                if len(vals) == 4:
+                    bus = "%04x:%02x:%02x.%x" % (vals["pciDomain"], vals["pciBus"], vals["pciDevice"], vals["pciFunction"])
+                    m.setdefault(bus, cur)
+                    cur = None  # first PCI block per GPU is enough
+    _vk_cache.update(t=time.time(), map=m)
+    return m
+
+
+def gpu_inventory() -> list[dict]:
+    gpus = all_gpus()
+    vk = vulkan_bus_map()
+    for g in gpus:
+        g["vk_index"] = vk.get(g["bus"])
+    return gpus
+
+
+def pool_gpus(pool_id: str, gpus: Optional[list[dict]] = None) -> list[dict]:
+    """GPUs that belong to a pool ('' = all GPUs)."""
+    gpus = gpus if gpus is not None else gpu_inventory()
+    if not pool_id:
+        return gpus
+    pool = load_config().get("pools", {}).get(pool_id)
+    if not pool:
+        raise HTTPException(400, f"GPU pool '{pool_id}' does not exist")
+    members = set(pool.get("gpus", []))
+    return [g for g in gpus if g["bus"] in members]
+
+
+def pool_vk_env(pool_id: str) -> dict[str, str]:
+    if not pool_id:
+        return {}
+    sel = pool_gpus(pool_id)
+    if not sel:
+        raise HTTPException(400, "This GPU pool has no GPUs that are currently installed")
+    idx = [g["vk_index"] for g in sel]
+    if any(i is None for i in idx):
+        raise HTTPException(400, "Could not match pool GPUs to Vulkan devices (is vulkan-tools installed and the driver loaded?)")
+    return {"GGML_VK_VISIBLE_DEVICES": ",".join(str(i) for i in sorted(idx))}
+
+
 _last_net = {"t": time.time(), "rx": 0, "tx": 0}
+
+
+# --------------------------------------------------------------------------------------
+# GPU pools: split cards into named groups (e.g. "AI" and "Media") and give each engine/app a pool
+# --------------------------------------------------------------------------------------
+POOL_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,30}$")
+OLLAMA_POOL_CONF = Path("/etc/systemd/system/ollama.service.d/ai-panel-pool.conf")
+
+
+class PoolsBody(BaseModel):
+    pools: dict[str, dict]
+
+
+@app.get("/api/pools")
+async def get_pools():
+    cfg = load_config()
+    gpus = await asyncio.to_thread(gpu_inventory)
+    return {"pools": cfg.get("pools", {}), "gpus": gpus, "ollama_pool": cfg.get("ollama_pool", ""),
+            "llama_pool": cfg["llama"].get("pool", "")}
+
+
+@app.post("/api/pools")
+async def save_pools(body: PoolsBody):
+    clean = {}
+    for pid, p in body.pools.items():
+        if not POOL_ID_RE.match(pid):
+            raise HTTPException(400, f"Pool id '{pid}': use lowercase letters, numbers and dashes")
+        name = str(p.get("name") or pid)[:40]
+        gpus = [str(b) for b in p.get("gpus", []) if re.match(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f]$", str(b))]
+        clean[pid] = {"name": name, "gpus": gpus}
+    cfg = load_config()
+    in_use = []
+    if cfg["llama"].get("pool") and cfg["llama"]["pool"] not in clean:
+        in_use.append("llama.cpp")
+    if cfg.get("ollama_pool") and cfg["ollama_pool"] not in clean:
+        in_use.append("Ollama")
+    for d in APPS_DIR.iterdir():
+        e = d / ".env"
+        if e.exists():
+            gp = parse_env(e.read_text()).get("GPU_POOL", "")
+            if gp and gp not in clean:
+                in_use.append(d.name)
+    if in_use:
+        raise HTTPException(400, "Pool still used by: " + ", ".join(in_use) + ". Switch them to another pool first.")
+    cfg["pools"] = clean
+    save_config(cfg)
+    return {"ok": True, "note": "Restart llama.cpp / re-apply the Ollama pool / Reconfigure apps to use changed pool members."}
+
+
+class PoolPick(BaseModel):
+    pool: str = ""
+
+
+@app.post("/api/ollama/pool")
+async def ollama_pool(body: PoolPick):
+    """Limit Ollama to one pool's GPUs (writes a systemd drop-in and restarts Ollama)."""
+    cfg = load_config()
+    if not body.pool:
+        OLLAMA_POOL_CONF.unlink(missing_ok=True)
+    else:
+        sel = pool_gpus(body.pool)
+        if not sel:
+            raise HTTPException(400, "This pool has no installed GPUs")
+        nv = [g["uuid"] for g in sel if g["vendor"] == "NVIDIA" and g.get("uuid")]
+        amd = [g["uuid"] for g in sel if g["vendor"] == "AMD" and g.get("uuid")]
+        if any(g["vendor"] == "AMD" and not g.get("uuid") for g in sel):
+            raise HTTPException(400, "An AMD GPU in this pool has no unique id in sysfs, so Ollama can't be limited to it")
+        lines = ["# Written by AI Panel: Ollama only uses GPU pool " + body.pool, "[Service]",
+                 f'Environment="CUDA_VISIBLE_DEVICES={",".join(nv) or "-1"}"',
+                 f'Environment="ROCR_VISIBLE_DEVICES={",".join(amd) or "-1"}"']
+        try:
+            lines.append(f'Environment="GGML_VK_VISIBLE_DEVICES={pool_vk_env(body.pool)["GGML_VK_VISIBLE_DEVICES"]}"')
+        except HTTPException:
+            pass
+        OLLAMA_POOL_CONF.parent.mkdir(parents=True, exist_ok=True)
+        OLLAMA_POOL_CONF.write_text("\n".join(lines) + "\n")
+    cfg["ollama_pool"] = body.pool
+    save_config(cfg)
+    run_quick(["systemctl", "daemon-reload"], timeout=20)
+    rc, out = run_quick(["systemctl", "restart", "ollama"], timeout=60)
+    return {"ok": rc == 0, "message": "Ollama restarted" if rc == 0 else out}
 
 
 @app.get("/api/stats")
 async def stats():
     gpus = await asyncio.to_thread(all_gpus)
+    pools = load_config().get("pools", {})
+    for g in gpus:
+        g["pools"] = [p.get("name", pid) for pid, p in pools.items() if g["bus"] in p.get("gpus", [])]
     total = sum(g["vram_total_mb"] or 0 for g in gpus)
     used = sum(g["vram_used_mb"] or 0 for g in gpus)
     vm = psutil.virtual_memory()
@@ -646,11 +796,11 @@ def llama_bin() -> Optional[str]:
 DEV_RE = re.compile(r"^\s*([A-Za-z]+\d+):\s+(.+?)\s+\((\d+) MiB,\s*(\d+) MiB free\)\s*$")
 
 
-def llama_devices() -> list[dict]:
+def llama_devices(extra_env: Optional[dict] = None) -> list[dict]:
     b = llama_bin()
     if not b:
         return []
-    env = {**os.environ, "LD_LIBRARY_PATH": str(Path(b).parent) + ":" + os.environ.get("LD_LIBRARY_PATH", "")}
+    env = {**os.environ, "LD_LIBRARY_PATH": str(Path(b).parent) + ":" + os.environ.get("LD_LIBRARY_PATH", ""), **(extra_env or {})}
     try:
         p = subprocess.run([b, "--list-devices"], capture_output=True, text=True, timeout=30, env=env)
     except Exception:
@@ -703,7 +853,11 @@ def build_llama_args(cfg: dict, devs: list[dict]) -> list[str]:
 async def llama_status():
     cfg = load_config()
     b = llama_bin()
-    devs = await asyncio.to_thread(llama_devices) if b else []
+    try:
+        penv = pool_vk_env(cfg["llama"].get("pool", ""))
+    except HTTPException:
+        penv = {}
+    devs = await asyncio.to_thread(llama_devices, penv) if b else []
     rc, out = run_quick(["systemctl", "is-active", "ai-llama.service"])
     out = out.strip().splitlines()[0] if out.strip() else "unknown"
     if out not in ("active", "inactive", "failed", "activating", "deactivating"):
@@ -750,14 +904,17 @@ class LlamaConfig(BaseModel):
     tensor_split: str = "auto"
     devices: str = ""
     extra: str = ""
+    pool: str = ""
 
 
-def write_llama_runner(args: list[str]) -> None:
+def write_llama_runner(args: list[str], extra_env: Optional[dict] = None) -> None:
     b = llama_bin()
     if not b:
         raise HTTPException(400, "llama.cpp is not installed (re-run install_app.sh)")
     script = "#!/bin/sh\n# generated by AI Panel - do not edit, use the web UI\n"
     script += f"export LD_LIBRARY_PATH={shlex.quote(str(Path(b).parent))}:$LD_LIBRARY_PATH\n"
+    for k, v in (extra_env or {}).items():
+        script += f"export {k}={shlex.quote(v)}\n"
     script += "exec " + " ".join(shlex.quote(x) for x in [b] + args) + "\n"
     LLAMA_RUN.write_text(script)
     os.chmod(LLAMA_RUN, 0o755)
@@ -773,6 +930,8 @@ async def llama_config(body: LlamaConfig):
         raise HTTPException(400, "devices must look like Vulkan0,Vulkan1")
     if body.host not in ("127.0.0.1", "0.0.0.0"):
         raise HTTPException(400, "host must be 127.0.0.1 or 0.0.0.0")
+    if body.pool and body.pool not in load_config().get("pools", {}):
+        raise HTTPException(400, "Unknown GPU pool")
     cfg = load_config()
     cfg["llama"].update(body.model_dump())
     save_config(cfg)
@@ -785,9 +944,10 @@ async def llama_action(action: str):
         raise HTTPException(404)
     if action in ("start", "restart"):
         cfg = load_config()
-        devs = await asyncio.to_thread(llama_devices)
+        penv = pool_vk_env(cfg["llama"].get("pool", ""))
+        devs = await asyncio.to_thread(llama_devices, penv)
         args = build_llama_args(cfg, devs)
-        write_llama_runner(args)
+        write_llama_runner(args, penv)
         action = "restart"
     rc, out = run_quick(["systemctl", action, "ai-llama.service"], timeout=30)
     if rc != 0:
@@ -1081,6 +1241,9 @@ def _app_view(a: dict, installed: bool, st: Optional[dict]) -> dict:
         env = parse_env(env_file.read_text())
         if env.get("APP_PORT"):
             port = int(env["APP_PORT"])
+    gpu_pool = ""
+    if installed and env_file.exists():
+        gpu_pool = parse_env(env_file.read_text()).get("GPU_POOL", "")
     status = "not_installed"
     if installed:
         if not st or st["total"] == 0:
@@ -1095,7 +1258,7 @@ def _app_view(a: dict, installed: bool, st: Optional[dict]) -> dict:
             "category": a.get("category", "Other"), "icon": a.get("icon", ""), "port": port,
             "scheme": a.get("scheme", "http"), "path": a.get("path", "/"), "gpu": bool(a.get("gpu")),
             "inputs": a.get("inputs", []), "notes": a.get("notes", ""), "custom": a.get("custom", False),
-            "website": a.get("website", ""), "installed": installed, "status": status,
+            "website": a.get("website", ""), "installed": installed, "status": status, "gpu_pool": gpu_pool,
             "containers": (st or {}).get("containers", [])}
 
 
@@ -1120,10 +1283,18 @@ def port_free(port: int) -> bool:
     return True
 
 
-def apply_gpu(compose: dict, a: dict, gpu_mode: str) -> None:
+def apply_gpu(compose: dict, a: dict, gpu_mode: str, sel: Optional[list[dict]] = None) -> None:
+    """sel = GPUs of the chosen pool (None = all GPUs)."""
     gpu = a.get("gpu") or {}
     if not gpu or gpu_mode == "none":
         return
+    nv_ids = [g["uuid"] for g in (sel or []) if g["vendor"] == "NVIDIA" and g.get("uuid")] if sel is not None else None
+    amd_nodes = None
+    if sel is not None:
+        amd_nodes = []
+        for g in sel:
+            if g["vendor"] == "AMD":
+                amd_nodes += [x for x in (g.get("render"), g.get("card")) if x]
     services = gpu.get("services") or list(compose.get("services", {}).keys())
     for name in services:
         svc = compose["services"].get(name)
@@ -1133,17 +1304,23 @@ def apply_gpu(compose: dict, a: dict, gpu_mode: str) -> None:
         if img:
             svc["image"] = img
         if gpu_mode == "nvidia":
-            svc.setdefault("deploy", {}).setdefault("resources", {}).setdefault("reservations", {})["devices"] = [
-                {"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]
+            dev = {"driver": "nvidia", "capabilities": ["gpu"]}
+            if nv_ids is None:
+                dev["count"] = "all"
+            else:
+                dev["device_ids"] = nv_ids
+            svc.setdefault("deploy", {}).setdefault("resources", {}).setdefault("reservations", {})["devices"] = [dev]
+            vis = "all" if nv_ids is None else ",".join(nv_ids)
             env = svc.setdefault("environment", {})
             if isinstance(env, dict):
-                env.setdefault("NVIDIA_VISIBLE_DEVICES", "all")
+                env["NVIDIA_VISIBLE_DEVICES"] = vis
                 env.setdefault("NVIDIA_DRIVER_CAPABILITIES", "all")
             else:
-                env += ["NVIDIA_VISIBLE_DEVICES=all", "NVIDIA_DRIVER_CAPABILITIES=all"]
+                env += [f"NVIDIA_VISIBLE_DEVICES={vis}", "NVIDIA_DRIVER_CAPABILITIES=all"]
         elif gpu_mode == "amd":
             devs = svc.setdefault("devices", [])
-            for d in ("/dev/kfd", "/dev/dri"):
+            wanted = ["/dev/kfd"] + (["/dev/dri"] if amd_nodes is None else amd_nodes)
+            for d in wanted:
                 if os.path.exists(d) and d not in devs:
                     devs.append(d)
             ga = svc.setdefault("group_add", [])
@@ -1181,6 +1358,7 @@ class InstallBody(BaseModel):
     inputs: dict[str, str] = {}
     port: Optional[int] = None
     gpu: str = "auto"
+    pool: str = ""
 
 
 def render_app(a: dict, body: InstallBody) -> tuple[str, str]:
@@ -1221,12 +1399,20 @@ def render_app(a: dict, body: InstallBody) -> tuple[str, str]:
     except Exception as e:
         raise HTTPException(400, f"Invalid compose YAML: {e}")
     gpu_mode = body.gpu
+    pool = body.pool if body.pool is not None else ""
     if a.get("gpu"):
-        vendors = gpu_vendors()
+        sel = pool_gpus(pool) if pool else None
+        if sel is not None:
+            vendors = {g["vendor"].lower() for g in sel}
+        else:
+            vendors = gpu_vendors()
         if gpu_mode == "auto":
             gpu_mode = "nvidia" if "nvidia" in vendors else ("amd" if "amd" in vendors else "none")
-        apply_gpu(compose, a, gpu_mode)
+        if sel is not None and gpu_mode in ("nvidia", "amd") and gpu_mode not in vendors:
+            raise HTTPException(400, f"GPU pool '{pool}' has no {gpu_mode.upper()} GPU")
+        apply_gpu(compose, a, gpu_mode, sel)
     env["GPU_MODE"] = gpu_mode
+    env["GPU_POOL"] = pool
     env_text = "".join(f"{k}={_env_quote(v)}\n" for k, v in env.items())
     return yaml.safe_dump(compose, sort_keys=False), env_text
 
@@ -1353,7 +1539,7 @@ async def apps_update_all():
                 a = next((x for x in load_catalog() if x["id"] == aid), None)
                 if a:
                     old = parse_env((APPS_DIR / aid / ".env").read_text())
-                    c, e = render_app(a, InstallBody(gpu=old.get("GPU_MODE", "auto")))
+                    c, e = render_app(a, InstallBody(gpu=old.get("GPU_MODE", "auto"), pool=old.get("GPU_POOL", "")))
                     (APPS_DIR / aid / "docker-compose.yml").write_text(c)
                     (APPS_DIR / aid / ".env").write_text(e)
                     (APPS_DIR / aid / "app.json").write_text(json.dumps(a, indent=2))
@@ -1389,7 +1575,7 @@ async def app_secrets(app_id: str):
     p = APPS_DIR / app_id / ".env"
     if not p.exists():
         raise HTTPException(404, "App is not installed")
-    hidden = {"DATA_DIR", "TZ", "HOST_IP", "GPU_MODE"}
+    hidden = {"DATA_DIR", "TZ", "HOST_IP", "GPU_MODE", "GPU_POOL"}
     return {k: v for k, v in parse_env(p.read_text()).items() if k not in hidden}
 
 
