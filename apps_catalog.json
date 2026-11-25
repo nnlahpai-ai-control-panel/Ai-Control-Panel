@@ -1,0 +1,406 @@
+{
+  "version": "2026.11.25",
+  "apps": [
+    {
+      "id": "open-webui",
+      "name": "Open WebUI",
+      "category": "AI",
+      "icon": "💬",
+      "port": 3000,
+      "description": "ChatGPT-style UI for your local Ollama and llama.cpp models (RAG, users, voice).",
+      "compose": "services:\n  open-webui:\n    image: ghcr.io/open-webui/open-webui:main\n    restart: unless-stopped\n    network_mode: host\n    environment:\n      PORT: ${APP_PORT}\n      OLLAMA_BASE_URL: http://127.0.0.1:11434\n      OPENAI_API_BASE_URL: http://127.0.0.1:8081/v1\n      OPENAI_API_KEY: none\n      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/data:/app/backend/data\n",
+      "env": {
+        "WEBUI_SECRET_KEY": "{{random_hex}}"
+      },
+      "website": "https://openwebui.com",
+      "notes": "Uses host networking so it can reach Ollama (11434) and llama.cpp (8081) on localhost. First account you create becomes admin."
+    },
+    {
+      "id": "comfyui",
+      "name": "ComfyUI",
+      "category": "AI",
+      "icon": "🎨",
+      "port": 8188,
+      "description": "Node-based Stable Diffusion / Flux image and video generation. GPU accelerated.",
+      "compose": "services:\n  comfyui:\n    image: yanwk/comfyui-boot:cu126-slim\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8188\"\n    environment:\n      CLI_ARGS: \"--listen 0.0.0.0\"\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/root:/root\n",
+      "gpu": {
+        "services": [
+          "comfyui"
+        ],
+        "images": {
+          "nvidia": "yanwk/comfyui-boot:cu126-slim",
+          "amd": "yanwk/comfyui-boot:rocm"
+        }
+      },
+      "website": "https://github.com/comfyanonymous/ComfyUI",
+      "notes": "Container images are vendor specific: pick NVIDIA or AMD in the GPU option. First start downloads several GB."
+    },
+    {
+      "id": "n8n",
+      "name": "n8n",
+      "category": "AI",
+      "icon": "🔀",
+      "port": 5678,
+      "description": "Workflow automation with AI agent nodes. Connect Ollama at http://host.docker.internal:11434.",
+      "compose": "services:\n  n8n:\n    image: docker.n8n.io/n8nio/n8n:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:5678\"\n    environment:\n      N8N_SECURE_COOKIE: \"false\"\n      N8N_HOST: ${HOST_IP}\n      WEBHOOK_URL: http://${HOST_IP}:${APP_PORT}/\n      GENERIC_TIMEZONE: ${TZ}\n      TZ: ${TZ}\n      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}\n    volumes:\n      - ${DATA_DIR}/n8n:/home/node/.n8n\n    extra_hosts:\n      - host.docker.internal:host-gateway\n",
+      "env": {
+        "N8N_ENCRYPTION_KEY": "{{random_hex}}"
+      },
+      "chown": {
+        "uid": 1000,
+        "dirs": [
+          "n8n"
+        ]
+      },
+      "website": "https://n8n.io"
+    },
+    {
+      "id": "flowise",
+      "name": "Flowise",
+      "category": "AI",
+      "icon": "🌊",
+      "port": 3001,
+      "description": "Drag-and-drop LLM apps, agents and RAG pipelines.",
+      "compose": "services:\n  flowise:\n    image: flowiseai/flowise:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:3000\"\n    environment:\n      PORT: \"3000\"\n      DATABASE_PATH: /root/.flowise\n      SECRETKEY_PATH: /root/.flowise\n      LOG_PATH: /root/.flowise/logs\n      BLOB_STORAGE_PATH: /root/.flowise/storage\n    volumes:\n      - ${DATA_DIR}/flowise:/root/.flowise\n    extra_hosts:\n      - host.docker.internal:host-gateway\n",
+      "website": "https://flowiseai.com"
+    },
+    {
+      "id": "anythingllm",
+      "name": "AnythingLLM",
+      "category": "AI",
+      "icon": "📚",
+      "port": 3002,
+      "description": "All-in-one private ChatGPT with document chat (RAG) and agents.",
+      "compose": "services:\n  anythingllm:\n    image: mintplexlabs/anythingllm:latest\n    restart: unless-stopped\n    cap_add:\n      - SYS_ADMIN\n    ports:\n      - \"${APP_PORT}:3001\"\n    environment:\n      STORAGE_DIR: /app/server/storage\n      LLM_PROVIDER: ollama\n      OLLAMA_BASE_PATH: http://host.docker.internal:11434\n    volumes:\n      - ${DATA_DIR}/storage:/app/server/storage\n    extra_hosts:\n      - host.docker.internal:host-gateway\n",
+      "chown": {
+        "uid": 1000,
+        "dirs": [
+          "storage"
+        ]
+      },
+      "website": "https://anythingllm.com"
+    },
+    {
+      "id": "hermes-agent",
+      "name": "Hermes Agent",
+      "category": "AI",
+      "icon": "🪽",
+      "port": 9119,
+      "description": "Nous Research's self-improving AI agent (memory, skills, Telegram/Discord gateway) with web dashboard.",
+      "compose": "services:\n  hermes:\n    image: nousresearch/hermes-agent:latest\n    container_name: hermes-agent\n    restart: unless-stopped\n    command: gateway run\n    ports:\n      - \"${APP_PORT}:9119\"\n      - \"8642:8642\"\n    environment:\n      HERMES_DASHBOARD: \"1\"\n      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: admin\n      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${DASHBOARD_PASSWORD}\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/hermes:/opt/data\n    extra_hosts:\n      - host.docker.internal:host-gateway\n",
+      "env": {
+        "DASHBOARD_PASSWORD": "{{random}}"
+      },
+      "website": "https://hermes-agent.nousresearch.com",
+      "notes": "Dashboard login: admin / the DASHBOARD_PASSWORD in Settings > App secrets. Configure a model by running 'docker exec -it hermes-agent hermes setup' in the Terminal tab. For a local model use the Ollama URL http://host.docker.internal:11434/v1."
+    },
+    {
+      "id": "openclaw",
+      "name": "OpenClaw",
+      "category": "AI",
+      "icon": "🦞",
+      "port": 18789,
+      "description": "Open-source personal AI assistant gateway (WhatsApp, Telegram, Discord, browser control).",
+      "compose": "services:\n  openclaw-gateway:\n    image: ghcr.io/openclaw/openclaw:latest\n    container_name: openclaw\n    restart: unless-stopped\n    command: [\"node\", \"dist/index.js\", \"gateway\", \"--bind\", \"lan\", \"--port\", \"18789\"]\n    ports:\n      - \"${APP_PORT}:18789\"\n    environment:\n      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}\n      OPENAI_API_KEY: ${OPENAI_API_KEY}\n      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/state:/home/node/.openclaw\n    extra_hosts:\n      - host.docker.internal:host-gateway\n",
+      "env": {
+        "OPENCLAW_GATEWAY_TOKEN": "{{random_hex}}"
+      },
+      "inputs": [
+        {
+          "key": "OPENAI_API_KEY",
+          "label": "OpenAI API key (optional)",
+          "secret": true
+        },
+        {
+          "key": "ANTHROPIC_API_KEY",
+          "label": "Anthropic API key (optional)",
+          "secret": true
+        }
+      ],
+      "chown": {
+        "uid": 1000,
+        "dirs": [
+          "state"
+        ]
+      },
+      "website": "https://openclaw.ai",
+      "notes": "Gateway token is in Settings > App secrets. Run onboarding once from the Terminal tab: docker exec -it openclaw node dist/index.js onboard"
+    },
+    {
+      "id": "searxng",
+      "name": "SearXNG",
+      "category": "AI",
+      "icon": "🔎",
+      "port": 8888,
+      "description": "Private meta search engine. Great as web search for Open WebUI and agents.",
+      "compose": "services:\n  searxng:\n    image: searxng/searxng:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8080\"\n    environment:\n      SEARXNG_BASE_URL: http://${HOST_IP}:${APP_PORT}/\n      SEARXNG_SECRET: ${SEARXNG_SECRET}\n    volumes:\n      - ${DATA_DIR}/config:/etc/searxng\n",
+      "env": {
+        "SEARXNG_SECRET": "{{random_hex}}"
+      },
+      "website": "https://docs.searxng.org"
+    },
+    {
+      "id": "qdrant",
+      "name": "Qdrant",
+      "category": "AI",
+      "icon": "🧲",
+      "port": 6333,
+      "description": "Vector database for RAG and semantic search (dashboard at /dashboard).",
+      "compose": "services:\n  qdrant:\n    image: qdrant/qdrant:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:6333\"\n    volumes:\n      - ${DATA_DIR}/storage:/qdrant/storage\n",
+      "path": "/dashboard",
+      "website": "https://qdrant.tech"
+    },
+    {
+      "id": "immich",
+      "name": "Immich",
+      "category": "Media",
+      "icon": "📷",
+      "port": 2283,
+      "description": "Self-hosted Google Photos: backup, face recognition, smart search (GPU ML).",
+      "compose": "services:\n  immich-server:\n    image: ghcr.io/immich-app/immich-server:release\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:2283\"\n    environment:\n      DB_PASSWORD: ${DB_PASSWORD}\n      DB_USERNAME: postgres\n      DB_DATABASE_NAME: immich\n      DB_HOSTNAME: database\n      REDIS_HOSTNAME: redis\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/library:/data\n      - /etc/localtime:/etc/localtime:ro\n    depends_on:\n      - redis\n      - database\n  immich-machine-learning:\n    image: ghcr.io/immich-app/immich-machine-learning:release\n    restart: unless-stopped\n    volumes:\n      - ${DATA_DIR}/model-cache:/cache\n  redis:\n    image: docker.io/valkey/valkey:8-bookworm\n    restart: unless-stopped\n  database:\n    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0\n    restart: unless-stopped\n    shm_size: 128mb\n    environment:\n      POSTGRES_PASSWORD: ${DB_PASSWORD}\n      POSTGRES_USER: postgres\n      POSTGRES_DB: immich\n      POSTGRES_INITDB_ARGS: --data-checksums\n    volumes:\n      - ${DATA_DIR}/postgres:/var/lib/postgresql/data\n",
+      "env": {
+        "DB_PASSWORD": "{{random}}"
+      },
+      "gpu": {
+        "services": [
+          "immich-machine-learning"
+        ],
+        "images": {
+          "nvidia": "ghcr.io/immich-app/immich-machine-learning:release-cuda",
+          "amd": "ghcr.io/immich-app/immich-machine-learning:release-rocm"
+        }
+      },
+      "website": "https://immich.app",
+      "notes": "Photos are stored in /opt/ai-panel/data/immich/library."
+    },
+    {
+      "id": "jellyfin",
+      "name": "Jellyfin",
+      "category": "Media",
+      "icon": "🎬",
+      "port": 8096,
+      "description": "Media server for movies, TV and music with GPU transcoding.",
+      "compose": "services:\n  jellyfin:\n    image: jellyfin/jellyfin:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8096\"\n    environment:\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - ${DATA_DIR}/cache:/cache\n      - ${DATA_DIR}/media:/media\n",
+      "gpu": {
+        "services": [
+          "jellyfin"
+        ]
+      },
+      "website": "https://jellyfin.org",
+      "notes": "Put media in /opt/ai-panel/data/jellyfin/media. Enable hardware transcoding in Dashboard > Playback."
+    },
+    {
+      "id": "nextcloud",
+      "name": "Nextcloud",
+      "category": "Files",
+      "icon": "☁️",
+      "port": 8084,
+      "description": "Your own cloud: files, calendar, contacts, office.",
+      "compose": "services:\n  nextcloud:\n    image: nextcloud:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    environment:\n      MYSQL_HOST: db\n      MYSQL_DATABASE: nextcloud\n      MYSQL_USER: nextcloud\n      MYSQL_PASSWORD: ${DB_PASSWORD}\n      NEXTCLOUD_TRUSTED_DOMAINS: ${HOST_IP} localhost\n    volumes:\n      - ${DATA_DIR}/html:/var/www/html\n    depends_on:\n      - db\n  db:\n    image: mariadb:11\n    restart: unless-stopped\n    command: --transaction-isolation=READ-COMMITTED\n    environment:\n      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}\n      MYSQL_DATABASE: nextcloud\n      MYSQL_USER: nextcloud\n      MYSQL_PASSWORD: ${DB_PASSWORD}\n    volumes:\n      - ${DATA_DIR}/db:/var/lib/mysql\n",
+      "env": {
+        "DB_PASSWORD": "{{random}}",
+        "DB_ROOT_PASSWORD": "{{random}}"
+      },
+      "website": "https://nextcloud.com"
+    },
+    {
+      "id": "filebrowser",
+      "name": "File Browser",
+      "category": "Files",
+      "icon": "🗂️",
+      "port": 8090,
+      "description": "Web file manager for the panel's app data folder.",
+      "compose": "services:\n  filebrowser:\n    image: filebrowser/filebrowser:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    volumes:\n      - /opt/ai-panel/data:/srv\n      - ${DATA_DIR}/database:/database\n      - ${DATA_DIR}/config:/config\n",
+      "website": "https://filebrowser.org",
+      "notes": "The first-run admin password is printed in the app logs (Logs button)."
+    },
+    {
+      "id": "wordpress",
+      "name": "WordPress",
+      "category": "Web",
+      "icon": "📝",
+      "port": 8082,
+      "description": "The world's most popular website and blog builder (with MariaDB).",
+      "compose": "services:\n  wordpress:\n    image: wordpress:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    environment:\n      WORDPRESS_DB_HOST: db\n      WORDPRESS_DB_USER: wordpress\n      WORDPRESS_DB_PASSWORD: ${DB_PASSWORD}\n      WORDPRESS_DB_NAME: wordpress\n    volumes:\n      - ${DATA_DIR}/html:/var/www/html\n    depends_on:\n      - db\n  db:\n    image: mariadb:11\n    restart: unless-stopped\n    environment:\n      MARIADB_DATABASE: wordpress\n      MARIADB_USER: wordpress\n      MARIADB_PASSWORD: ${DB_PASSWORD}\n      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}\n    volumes:\n      - ${DATA_DIR}/db:/var/lib/mysql\n",
+      "env": {
+        "DB_PASSWORD": "{{random}}",
+        "DB_ROOT_PASSWORD": "{{random}}"
+      },
+      "website": "https://wordpress.org"
+    },
+    {
+      "id": "invoiceplane",
+      "name": "InvoicePlane",
+      "category": "Business",
+      "icon": "🧾",
+      "port": 8083,
+      "description": "Invoicing, quotes, clients and payments for small businesses.",
+      "compose": "services:\n  invoiceplane:\n    image: mhzawadi/invoiceplane:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    environment:\n      TZ: ${TZ}\n      MYSQL_HOST: db\n      MYSQL_USER: invoiceplane\n      MYSQL_PASSWORD: ${DB_PASSWORD}\n      MYSQL_DB: invoiceplane\n      IP_URL: http://${HOST_IP}:${APP_PORT}\n      DISABLE_SETUP: \"false\"\n    volumes:\n      - ${DATA_DIR}/uploads:/var/www/html/uploads\n      - ${DATA_DIR}/css:/var/www/html/assets/core/css\n      - ${DATA_DIR}/views:/var/www/html/application/views\n    depends_on:\n      - db\n  db:\n    image: mariadb:11\n    restart: unless-stopped\n    environment:\n      MARIADB_DATABASE: invoiceplane\n      MARIADB_USER: invoiceplane\n      MARIADB_PASSWORD: ${DB_PASSWORD}\n      MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}\n    volumes:\n      - ${DATA_DIR}/db:/var/lib/mysql\n",
+      "env": {
+        "DB_PASSWORD": "{{random}}",
+        "DB_ROOT_PASSWORD": "{{random}}"
+      },
+      "path": "/index.php/setup",
+      "website": "https://invoiceplane.com",
+      "notes": "Open the app and finish the setup wizard. Database host is 'db', credentials are in Settings > App secrets."
+    },
+    {
+      "id": "ghost",
+      "name": "Ghost",
+      "category": "Web",
+      "icon": "👻",
+      "port": 2368,
+      "description": "Modern publishing platform for blogs and newsletters.",
+      "compose": "services:\n  ghost:\n    image: ghost:5\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:2368\"\n    environment:\n      url: http://${HOST_IP}:${APP_PORT}\n      database__client: mysql\n      database__connection__host: db\n      database__connection__user: ghost\n      database__connection__password: ${DB_PASSWORD}\n      database__connection__database: ghost\n    volumes:\n      - ${DATA_DIR}/content:/var/lib/ghost/content\n    depends_on:\n      - db\n  db:\n    image: mysql:8\n    restart: unless-stopped\n    environment:\n      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}\n      MYSQL_DATABASE: ghost\n      MYSQL_USER: ghost\n      MYSQL_PASSWORD: ${DB_PASSWORD}\n    volumes:\n      - ${DATA_DIR}/db:/var/lib/mysql\n",
+      "env": {
+        "DB_PASSWORD": "{{random}}",
+        "DB_ROOT_PASSWORD": "{{random}}"
+      },
+      "website": "https://ghost.org"
+    },
+    {
+      "id": "cloudflared",
+      "name": "Cloudflare Tunnel",
+      "category": "Network",
+      "icon": "🌐",
+      "port": null,
+      "description": "Publish apps to the internet with HTTPS through Cloudflare, no port forwarding needed.",
+      "compose": "services:\n  cloudflared:\n    image: cloudflare/cloudflared:latest\n    restart: unless-stopped\n    network_mode: host\n    command: tunnel --no-autoupdate run\n    environment:\n      TUNNEL_TOKEN: ${TUNNEL_TOKEN}\n",
+      "inputs": [
+        {
+          "key": "TUNNEL_TOKEN",
+          "label": "Cloudflare tunnel token",
+          "required": true,
+          "secret": true,
+          "help": "Cloudflare dashboard > Zero Trust > Networks > Tunnels > Create tunnel > Docker. Copy the token after --token."
+        }
+      ],
+      "website": "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/",
+      "notes": "Uses host networking, so in Cloudflare set each public hostname's service to http://localhost:<app port>, e.g. http://localhost:3000 for Open WebUI."
+    },
+    {
+      "id": "nginx-proxy-manager",
+      "name": "Nginx Proxy Manager",
+      "category": "Network",
+      "icon": "🔀",
+      "port": 81,
+      "description": "Reverse proxy with free Let's Encrypt SSL and a simple UI (uses ports 80/443).",
+      "compose": "services:\n  npm:\n    image: jc21/nginx-proxy-manager:latest\n    restart: unless-stopped\n    ports:\n      - \"80:80\"\n      - \"443:443\"\n      - \"${APP_PORT}:81\"\n    volumes:\n      - ${DATA_DIR}/data:/data\n      - ${DATA_DIR}/letsencrypt:/etc/letsencrypt\n    extra_hosts:\n      - host.docker.internal:host-gateway\n",
+      "website": "https://nginxproxymanager.com",
+      "notes": "Set your login on first visit (older versions: admin@example.com / changeme)."
+    },
+    {
+      "id": "vaultwarden",
+      "name": "Vaultwarden",
+      "category": "Security",
+      "icon": "🔐",
+      "port": 8091,
+      "description": "Lightweight Bitwarden-compatible password manager.",
+      "compose": "services:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    environment:\n      ADMIN_TOKEN: ${ADMIN_TOKEN}\n    volumes:\n      - ${DATA_DIR}/data:/data\n",
+      "env": {
+        "ADMIN_TOKEN": "{{random}}"
+      },
+      "website": "https://github.com/dani-garcia/vaultwarden",
+      "notes": "Browsers only allow the web vault over HTTPS. Put it behind Cloudflare Tunnel or Nginx Proxy Manager."
+    },
+    {
+      "id": "wireguard",
+      "name": "WireGuard (wg-easy)",
+      "category": "Network",
+      "icon": "🛡️",
+      "port": 51821,
+      "description": "VPN with a web UI: reach your server securely from anywhere.",
+      "compose": "services:\n  wg-easy:\n    image: ghcr.io/wg-easy/wg-easy:15\n    restart: unless-stopped\n    ports:\n      - \"51820:51820/udp\"\n      - \"${APP_PORT}:51821/tcp\"\n    environment:\n      INSECURE: \"true\"\n    cap_add:\n      - NET_ADMIN\n      - SYS_MODULE\n    sysctls:\n      - net.ipv4.ip_forward=1\n      - net.ipv4.conf.all.src_valid_mark=1\n    volumes:\n      - ${DATA_DIR}/config:/etc/wireguard\n      - /lib/modules:/lib/modules:ro\n",
+      "website": "https://wg-easy.github.io/wg-easy/",
+      "notes": "Forward UDP 51820 on your router to this server."
+    },
+    {
+      "id": "portainer",
+      "name": "Portainer",
+      "category": "Management",
+      "icon": "🐳",
+      "port": 9443,
+      "description": "Full Docker management UI (containers, images, volumes, stacks).",
+      "compose": "services:\n  portainer:\n    image: portainer/portainer-ce:lts\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:9443\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - ${DATA_DIR}/data:/data\n",
+      "scheme": "https",
+      "website": "https://www.portainer.io",
+      "notes": "Create the admin user within 5 minutes of first start, or restart the app."
+    },
+    {
+      "id": "watchtower",
+      "name": "Watchtower",
+      "category": "Management",
+      "icon": "🔄",
+      "port": null,
+      "description": "Automatically updates all running containers every night at 4 AM and removes old images.",
+      "compose": "services:\n  watchtower:\n    image: nickfedor/watchtower:latest\n    restart: unless-stopped\n    environment:\n      WATCHTOWER_CLEANUP: \"true\"\n      WATCHTOWER_SCHEDULE: \"0 0 4 * * *\"\n      TZ: ${TZ}\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n",
+      "website": "https://watchtower.nickfedor.com",
+      "notes": "Maintained fork of containrrr/watchtower (the original was archived and breaks on Docker 29)."
+    },
+    {
+      "id": "dozzle",
+      "name": "Dozzle",
+      "category": "Management",
+      "icon": "📜",
+      "port": 9999,
+      "description": "Live log viewer for every container.",
+      "compose": "services:\n  dozzle:\n    image: amir20/dozzle:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8080\"\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n",
+      "website": "https://dozzle.dev"
+    },
+    {
+      "id": "uptime-kuma",
+      "name": "Uptime Kuma",
+      "category": "Management",
+      "icon": "📈",
+      "port": 3003,
+      "description": "Uptime monitoring with alerts (Telegram, Discord, email...).",
+      "compose": "services:\n  uptime-kuma:\n    image: louislam/uptime-kuma:2\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:3001\"\n    volumes:\n      - ${DATA_DIR}/data:/app/data\n",
+      "website": "https://uptime.kuma.pet"
+    },
+    {
+      "id": "netdata",
+      "name": "Netdata",
+      "category": "Management",
+      "icon": "📊",
+      "port": 19999,
+      "description": "Real-time server monitoring with thousands of metrics.",
+      "compose": "services:\n  netdata:\n    image: netdata/netdata:stable\n    restart: unless-stopped\n    pid: host\n    network_mode: host\n    cap_add:\n      - SYS_PTRACE\n      - SYS_ADMIN\n    security_opt:\n      - apparmor:unconfined\n    volumes:\n      - ${DATA_DIR}/config:/etc/netdata\n      - ${DATA_DIR}/lib:/var/lib/netdata\n      - ${DATA_DIR}/cache:/var/cache/netdata\n      - /:/host/root:ro,rslave\n      - /etc/passwd:/host/etc/passwd:ro\n      - /etc/group:/host/etc/group:ro\n      - /etc/os-release:/host/etc/os-release:ro\n      - /proc:/host/proc:ro\n      - /sys:/host/sys:ro\n      - /var/run/docker.sock:/var/run/docker.sock:ro\n",
+      "website": "https://www.netdata.cloud",
+      "notes": "Listens on port 19999 on the host network."
+    },
+    {
+      "id": "code-server",
+      "name": "VS Code (code-server)",
+      "category": "Dev",
+      "icon": "🧑‍💻",
+      "port": 8443,
+      "description": "VS Code in the browser.",
+      "compose": "services:\n  code-server:\n    image: lscr.io/linuxserver/code-server:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8443\"\n    environment:\n      PUID: \"1000\"\n      PGID: \"1000\"\n      TZ: ${TZ}\n      PASSWORD: ${PASSWORD}\n    volumes:\n      - ${DATA_DIR}/config:/config\n",
+      "env": {
+        "PASSWORD": "{{random}}"
+      },
+      "website": "https://coder.com",
+      "notes": "Password is in Settings > App secrets."
+    },
+    {
+      "id": "gitea",
+      "name": "Gitea",
+      "category": "Dev",
+      "icon": "🍵",
+      "port": 3005,
+      "description": "Lightweight self-hosted Git service (SSH on port 2222).",
+      "compose": "services:\n  gitea:\n    image: gitea/gitea:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:3000\"\n      - \"2222:22\"\n    environment:\n      USER_UID: \"1000\"\n      USER_GID: \"1000\"\n    volumes:\n      - ${DATA_DIR}/data:/data\n",
+      "website": "https://about.gitea.com"
+    },
+    {
+      "id": "home-assistant",
+      "name": "Home Assistant",
+      "category": "Home",
+      "icon": "🏠",
+      "port": 8123,
+      "description": "Smart home automation hub.",
+      "compose": "services:\n  homeassistant:\n    image: ghcr.io/home-assistant/home-assistant:stable\n    restart: unless-stopped\n    network_mode: host\n    privileged: true\n    environment:\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /run/dbus:/run/dbus:ro\n",
+      "website": "https://www.home-assistant.io"
+    }
+  ]
+}

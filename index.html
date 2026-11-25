@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Server Control Panel</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🧠</text></svg>">
+<!-- All assets are served locally from /static so the panel works on offline LANs -->
+<link rel="stylesheet" href="/static/tailwind.css">
+<link rel="stylesheet" href="/static/xterm.css">
+<script src="/static/xterm.js"></script>
+<script src="/static/addon-fit.js"></script>
+<style>
+  body { background: #0b0f17; }
+  .card { background: #111827; border: 1px solid #1f2a3d; border-radius: 14px; }
+  .btn { padding: .45rem .9rem; border-radius: 9px; font-size: .85rem; font-weight: 600; transition: .15s; white-space: nowrap; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-p { background: #0ea5e9; color: #fff; } .btn-p:hover:not(:disabled) { background: #0284c7; }
+  .btn-g { background: #1b2436; color: #cbd5e1; border: 1px solid #28324a; } .btn-g:hover:not(:disabled) { background: #28324a; }
+  .btn-d { background: #3b1219; color: #fca5a5; border: 1px solid #7f1d1d; } .btn-d:hover:not(:disabled) { background: #7f1d1d; }
+  .btn-s { background: #052e1c; color: #86efac; border: 1px solid #166534; } .btn-s:hover:not(:disabled) { background: #14532d; }
+  .inp { background: #0b0f17; border: 1px solid #28324a; border-radius: 9px; padding: .5rem .75rem; color: #e2e8f0; width: 100%; font-size: .9rem; }
+  .inp:focus { outline: none; border-color: #38bdf8; }
+  .tab { padding: .6rem 1rem; border-radius: 10px; color: #94a3b8; font-weight: 600; display: flex; gap: .5rem; align-items: center; }
+  .tab.active { background: #1b2436; color: #fff; }
+  .tab:hover { color: #fff; }
+  .bar { height: 8px; background: #1b2436; border-radius: 99px; overflow: hidden; }
+  .bar > div { height: 100%; border-radius: 99px; transition: width .6s; }
+  .pill { font-size: .7rem; padding: .1rem .5rem; border-radius: 99px; font-weight: 700; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; } ::-webkit-scrollbar-thumb { background: #28324a; border-radius: 9px; }
+  .xterm { padding: 8px; }
+  pre.log { background: #05080e; color: #a5b4c8; font-size: 12px; padding: 10px; border-radius: 9px; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body class="text-slate-200 min-h-screen">
+
+<!-- ============ LOGIN ============ -->
+<div id="login" class="hidden min-h-screen flex items-center justify-center p-4">
+  <form id="loginForm" class="card p-8 w-full max-w-sm space-y-4">
+    <div class="text-center">
+      <div class="text-5xl">🧠</div>
+      <h1 class="text-2xl font-bold mt-2">AI Server Control</h1>
+      <p class="text-slate-400 text-sm">Sign in to manage your server</p>
+    </div>
+    <input id="lu" class="inp" placeholder="Username" autocomplete="username" value="admin">
+    <input id="lp" class="inp" type="password" placeholder="Password" autocomplete="current-password">
+    <p id="lerr" class="text-red-400 text-sm hidden"></p>
+    <button class="btn btn-p w-full py-2.5">Sign in</button>
+  </form>
+</div>
+
+<!-- ============ APP ============ -->
+<div id="main" class="hidden">
+  <header class="sticky top-0 z-30 bg-ink-950/90 backdrop-blur border-b border-ink-800">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
+      <div class="flex items-center gap-2 mr-4">
+        <span class="text-2xl">🧠</span>
+        <div>
+          <div class="font-bold leading-tight">AI Server Control</div>
+          <div id="hostname" class="text-xs text-slate-500"></div>
+        </div>
+      </div>
+      <nav class="flex gap-1 flex-wrap" id="tabs">
+        <button class="tab active" data-tab="dash">📊 <span>GPU &amp; System</span></button>
+        <button class="tab" data-tab="models">🤖 <span>AI Models</span></button>
+        <button class="tab" data-tab="apps">🛍️ <span>App Store</span></button>
+        <button class="tab" data-tab="term">⌨️ <span>Terminal</span></button>
+        <button class="tab" data-tab="settings">⚙️ <span>Settings</span></button>
+      </nav>
+      <div class="ml-auto flex items-center gap-2">
+        <button id="tasksBtn" class="btn btn-g relative">⏳ Tasks <span id="taskCount" class="hidden absolute -top-1 -right-1 bg-accent-500 text-white text-xs rounded-full px-1.5"></span></button>
+        <button id="logoutBtn" class="btn btn-g">Sign out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto p-4">
+
+    <!-- ---------- DASHBOARD ---------- -->
+    <section id="tab-dash" class="space-y-4">
+      <div class="card p-5">
+        <div class="flex flex-wrap items-end justify-between gap-3 mb-3">
+          <div>
+            <div class="text-slate-400 text-sm">Combined VRAM pool</div>
+            <div class="text-3xl font-bold"><span id="poolUsed">0</span> <span class="text-slate-500 text-xl">/ <span id="poolTotal">0</span> GB</span></div>
+            <div id="poolDesc" class="text-sm text-slate-400 mt-1"></div>
+          </div>
+          <div class="text-right text-sm text-slate-400" id="sysLine"></div>
+        </div>
+        <div class="bar !h-3"><div id="poolBar" class="bg-gradient-to-r from-accent-500 to-violet-500" style="width:0"></div></div>
+        <div id="poolSegs" class="flex mt-2 gap-1 text-xs"></div>
+      </div>
+      <div id="gpuCards" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3"></div>
+      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" id="sysCards"></div>
+    </section>
+
+    <!-- ---------- MODELS ---------- -->
+    <section id="tab-models" class="hidden space-y-4">
+      <div class="flex gap-2">
+        <button class="btn btn-p" data-sub="ollama">Ollama</button>
+        <button class="btn btn-g" data-sub="llama">llama.cpp (mixed GPU pool)</button>
+      </div>
+
+      <div id="sub-ollama" class="space-y-4">
+        <div class="card p-5">
+          <div class="flex flex-wrap items-center gap-3 justify-between">
+            <div>
+              <h2 class="text-lg font-bold">Installed Ollama models</h2>
+              <p id="ollamaStatus" class="text-sm text-slate-400"></p>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <input id="pullName" class="inp !w-64" placeholder="Any model, e.g. qwen3:14b or hf.co/user/repo">
+              <button id="pullBtn" class="btn btn-p">⬇ Pull</button>
+              <button id="updateAllModels" class="btn btn-g">🔄 Update all</button>
+            </div>
+          </div>
+          <div id="ollamaModels" class="mt-4 divide-y divide-ink-800"></div>
+        </div>
+        <div class="card p-5">
+          <div class="flex flex-wrap justify-between gap-2 items-center mb-3">
+            <h2 class="text-lg font-bold">Model library</h2>
+            <input id="libFilter" class="inp !w-56" placeholder="Filter (qwen, coder, vision...)">
+          </div>
+          <div id="library" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3"></div>
+          <p class="text-xs text-slate-500 mt-3">Sizes are approximate downloads. Anything on ollama.com/library works in the Pull box too.</p>
+        </div>
+      </div>
+
+      <div id="sub-llama" class="hidden space-y-4">
+        <div class="card p-5">
+          <div class="flex flex-wrap justify-between gap-3">
+            <div>
+              <h2 class="text-lg font-bold">llama-server <span id="llamaBadge"></span></h2>
+              <p class="text-sm text-slate-400">The Vulkan build pools NVIDIA, AMD and Intel cards together. Layers split by each card's VRAM. OpenAI-compatible API at <code id="llamaApi" class="text-accent-400"></code></p>
+            </div>
+            <div class="flex gap-2">
+              <button id="llamaStart" class="btn btn-s">▶ Start / Restart</button>
+              <button id="llamaStop" class="btn btn-d">■ Stop</button>
+              <button id="llamaLogs" class="btn btn-g">Logs</button>
+            </div>
+          </div>
+          <div id="llamaDevices" class="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3"></div>
+          <div class="grid gap-3 md:grid-cols-3 mt-4 text-sm">
+            <label class="md:col-span-3">Model (GGUF)<select id="lModel" class="inp mt-1"></select></label>
+            <label>Context size<input id="lCtx" type="number" class="inp mt-1"></label>
+            <label>GPU layers (-1 = auto fit)<input id="lNgl" type="number" class="inp mt-1"></label>
+            <label>Split mode<select id="lSplit" class="inp mt-1"><option value="layer">layer (best for mixed GPUs)</option><option value="row">row</option><option value="tensor">tensor (experimental)</option><option value="none">none (one GPU)</option></select></label>
+            <label>Tensor split<input id="lTs" class="inp mt-1" placeholder="auto, fit, or 8,12,16"></label>
+            <label>Devices (blank = all)<input id="lDev" class="inp mt-1" placeholder="Vulkan0,Vulkan1"></label>
+            <label>Listen on<select id="lHost" class="inp mt-1"><option value="127.0.0.1">This server only (127.0.0.1)</option><option value="0.0.0.0">Whole network (0.0.0.0)</option></select></label>
+            <label>Port<input id="lPort" type="number" class="inp mt-1"></label>
+            <label class="md:col-span-2">Extra arguments<input id="lExtra" class="inp mt-1" placeholder="--flash-attn auto -t 8"></label>
+          </div>
+          <div class="mt-3 flex gap-2"><button id="lSave" class="btn btn-p">Save settings</button><span id="lSaved" class="text-sm text-green-400 self-center"></span></div>
+          <pre id="llamaLog" class="log mt-3 hidden"></pre>
+        </div>
+        <div class="card p-5">
+          <h2 class="text-lg font-bold mb-1">GGUF models</h2>
+          <div id="ggufList" class="divide-y divide-ink-800 mb-4"></div>
+          <div class="grid gap-4 lg:grid-cols-3">
+            <div class="space-y-2">
+              <h3 class="font-semibold">From Hugging Face</h3>
+              <div class="flex gap-2"><input id="hfRepo" class="inp" placeholder="unsloth/Qwen3-30B-A3B-GGUF"><button id="hfList" class="btn btn-g">List</button></div>
+              <div id="hfFiles" class="max-h-72 overflow-auto divide-y divide-ink-800 text-sm"></div>
+            </div>
+            <div class="space-y-2">
+              <h3 class="font-semibold">From any URL</h3>
+              <input id="urlGguf" class="inp" placeholder="https://example.com/model.Q4_K_M.gguf">
+              <button id="urlGgufBtn" class="btn btn-g">⬇ Download</button>
+            </div>
+            <div class="space-y-2">
+              <h3 class="font-semibold">From this computer</h3>
+              <input id="upGguf" type="file" accept=".gguf" class="inp">
+              <button id="upGgufBtn" class="btn btn-g">⬆ Upload</button>
+              <div id="upProg" class="bar hidden"><div class="bg-accent-500" style="width:0"></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------- APP STORE ---------- -->
+    <section id="tab-apps" class="hidden space-y-4">
+      <div class="card p-4 flex flex-wrap gap-3 items-center">
+        <input id="appFilter" class="inp !w-64" placeholder="Search apps...">
+        <div id="catBtns" class="flex gap-1 flex-wrap"></div>
+        <div class="ml-auto flex gap-2">
+          <button id="updateAllApps" class="btn btn-g">🔄 Update all apps</button>
+          <button id="customBtn" class="btn btn-p">＋ Custom app</button>
+        </div>
+      </div>
+      <div id="dockerWarn" class="hidden card p-4 text-amber-300"></div>
+      <div id="appGrid" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"></div>
+    </section>
+
+    <!-- ---------- TERMINAL ---------- -->
+    <section id="tab-term" class="hidden">
+      <div class="card p-2">
+        <div class="flex items-center justify-between px-2 py-1">
+          <div class="text-sm text-slate-400">root shell on <span id="termHost"></span> <span id="termState" class="pill bg-ink-800 ml-2">disconnected</span></div>
+          <div class="flex gap-2"><button id="termReconnect" class="btn btn-g">Reconnect</button></div>
+        </div>
+        <div id="terminal" style="height: calc(100vh - 210px); min-height: 360px;"></div>
+      </div>
+    </section>
+
+    <!-- ---------- SETTINGS ---------- -->
+    <section id="tab-settings" class="hidden grid gap-4 lg:grid-cols-2">
+      <div class="card p-5 space-y-3">
+        <h2 class="text-lg font-bold">Change password</h2>
+        <input id="pwCur" type="password" class="inp" placeholder="Current password">
+        <input id="pwNew" type="password" class="inp" placeholder="New password (8+ characters)">
+        <button id="pwBtn" class="btn btn-p">Update password</button>
+        <p id="pwMsg" class="text-sm"></p>
+      </div>
+      <div class="card p-5 space-y-3">
+        <h2 class="text-lg font-bold">Updates</h2>
+        <div id="sysInfo" class="text-sm text-slate-400 space-y-1"></div>
+        <label class="text-sm block">Update source (folder URL holding app.py, index.html, apps_catalog.json)
+          <input id="updUrl" class="inp mt-1" placeholder="https://raw.githubusercontent.com/you/ai-panel/main">
+        </label>
+        <div class="flex flex-wrap gap-2">
+          <button id="updUrlSave" class="btn btn-g">Save URL</button>
+          <button id="updCatalog" class="btn btn-g">Refresh app catalog</button>
+          <button id="updPanel" class="btn btn-p">Update panel</button>
+          <button id="updEngines" class="btn btn-g">Update Ollama + llama.cpp</button>
+        </div>
+        <p id="updMsg" class="text-sm"></p>
+      </div>
+      <div class="card p-5 space-y-3 lg:col-span-2">
+        <h2 class="text-lg font-bold">App secrets</h2>
+        <p class="text-sm text-slate-400">Generated passwords and tokens for installed apps.</p>
+        <div class="flex gap-2"><select id="secApp" class="inp !w-64"></select><button id="secShow" class="btn btn-g">Show</button></div>
+        <div id="secOut" class="text-sm font-mono"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- ============ MODAL ============ -->
+<div id="modal" class="hidden fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+  <div class="card w-full max-w-2xl max-h-[90vh] overflow-auto">
+    <div class="flex justify-between items-center p-4 border-b border-ink-800">
+      <h3 id="mTitle" class="font-bold text-lg"></h3>
+      <button onclick="closeModal()" class="text-slate-400 hover:text-white text-2xl leading-none">×</button>
+    </div>
+    <div id="mBody" class="p-4"></div>
+  </div>
+</div>
+
+<!-- ============ TASK DRAWER ============ -->
+<div id="drawer" class="hidden fixed right-0 top-0 bottom-0 w-full sm:w-[440px] z-40 bg-ink-900 border-l border-ink-800 flex flex-col">
+  <div class="flex justify-between items-center p-4 border-b border-ink-800">
+    <h3 class="font-bold">Tasks</h3>
+    <button onclick="toggleDrawer(false)" class="text-slate-400 hover:text-white text-2xl leading-none">×</button>
+  </div>
+  <div id="taskList" class="flex-1 overflow-auto p-3 space-y-2"></div>
+</div>
+
+<div id="toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[60] space-y-2"></div>
+
+<script>
+// ===================================================================== helpers
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const gb = b => (b / 1073741824).toFixed(b >= 10737418240 ? 0 : 1);
+const fmtBytes = b => { if (!b) return '0 B'; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return b.toFixed(i > 2 ? 1 : 0) + ' ' + u[i]; };
+const HOST = location.hostname;
+
+async function api(path, opts = {}) {
+  const o = { method: opts.method || 'GET', headers: { 'X-Requested-With': 'aipanel' }, credentials: 'same-origin' };
+  if (opts.body !== undefined) { o.headers['Content-Type'] = 'application/json'; o.body = JSON.stringify(opts.body); o.method = opts.method || 'POST'; }
+  if (opts.method && !o.body && opts.method !== 'GET') o.method = opts.method;
+  const r = await fetch(path, o);
+  if (r.status === 401 && path !== '/api/login') { showLogin(); throw new Error('Signed out'); }
+  let data = null; try { data = await r.json(); } catch { }
+  if (!r.ok) throw new Error((data && (data.detail?.toString?.() || JSON.stringify(data.detail))) || r.statusText);
+  return data;
+}
+const post = (p, b = {}) => api(p, { method: 'POST', body: b });
+
+function toast(msg, kind = 'ok') {
+  const el = document.createElement('div');
+  el.className = 'px-4 py-2 rounded-lg shadow-lg text-sm font-medium ' + (kind === 'err' ? 'bg-red-900 text-red-100' : 'bg-ink-700 text-white');
+  el.textContent = msg; $('#toast').appendChild(el); setTimeout(() => el.remove(), 4500);
+}
+function openModal(title, html) { $('#mTitle').textContent = title; $('#mBody').innerHTML = html; $('#modal').classList.remove('hidden'); }
+function closeModal() { $('#modal').classList.add('hidden'); }
+$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
+async function guard(fn, btn) { if (btn) btn.disabled = true; try { return await fn(); } catch (e) { toast(e.message, 'err'); } finally { if (btn) btn.disabled = false; } }
+
+// ===================================================================== auth
+function showLogin() { $('#main').classList.add('hidden'); $('#login').classList.remove('hidden'); $('#lp').focus(); stopPolling(); }
+$('#loginForm').addEventListener('submit', async e => {
+  e.preventDefault(); $('#lerr').classList.add('hidden');
+  try { await post('/api/login', { username: $('#lu').value, password: $('#lp').value }); $('#lp').value = ''; start(); }
+  catch (err) { $('#lerr').textContent = err.message; $('#lerr').classList.remove('hidden'); }
+});
+$('#logoutBtn').onclick = async () => { await post('/api/logout'); if (term.ws) term.ws.close(); showLogin(); };
+
+async function start() {
+  let me; try { me = await api('/api/me'); } catch { return showLogin(); }
+  $('#login').classList.add('hidden'); $('#main').classList.remove('hidden');
+  $('#hostname').textContent = `${me.user}@${me.hostname} · v${me.version}`; $('#termHost').textContent = me.hostname;
+  showTab(location.hash.slice(1) || 'dash'); startPolling();
+}
+
+// ===================================================================== tabs
+let currentTab = 'dash';
+function showTab(t) {
+  if (!$('#tab-' + t)) t = 'dash';
+  currentTab = t; history.replaceState(null, '', '#' + t);
+  $$('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
+  $$('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + t));
+  if (t === 'dash') loadStats();
+  if (t === 'models') { loadOllama(); loadLlama(); }
+  if (t === 'apps') loadApps();
+  if (t === 'term') openTerminal();
+  if (t === 'settings') loadSettings();
+}
+$$('#tabs .tab').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+$$('[data-sub]').forEach(b => b.onclick = () => {
+  $$('[data-sub]').forEach(x => { x.classList.toggle('btn-p', x === b); x.classList.toggle('btn-g', x !== b); });
+  $('#sub-ollama').classList.toggle('hidden', b.dataset.sub !== 'ollama');
+  $('#sub-llama').classList.toggle('hidden', b.dataset.sub !== 'llama');
+});
+
+let pollTimer = null, taskTimer = null;
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(() => { if (currentTab === 'dash' && !document.hidden) loadStats(); }, 2000);
+  taskTimer = setInterval(pollTasks, 1500);
+}
+function stopPolling() { clearInterval(pollTimer); clearInterval(taskTimer); }
+
+// ===================================================================== dashboard
+const vendorColor = { NVIDIA: '#76b900', AMD: '#ed1c24', Intel: '#0071c5' };
+function usageColor(p) { return p > 90 ? 'bg-red-500' : p > 70 ? 'bg-amber-500' : 'bg-accent-500'; }
+async function loadStats() {
+  let s; try { s = await api('/api/stats'); } catch { return; }
+  const tot = s.pool.total_mb / 1024, used = s.pool.used_mb / 1024;
+  $('#poolUsed').textContent = used.toFixed(1); $('#poolTotal').textContent = tot.toFixed(1);
+  $('#poolBar').style.width = (tot ? used / tot * 100 : 0) + '%';
+  $('#poolDesc').textContent = s.gpus.length ? s.gpus.map(g => `${((g.vram_total_mb || 0) / 1024).toFixed(0)}GB`).join(' + ') + ` = ${tot.toFixed(0)}GB across ${s.gpus.length} GPU${s.gpus.length > 1 ? 's' : ''}` : 'No GPUs detected (drivers missing or CPU-only server)';
+  $('#poolSegs').innerHTML = s.gpus.map(g => `<div style="flex:${g.vram_total_mb || 1}" class="truncate text-slate-400"><span style="color:${vendorColor[g.vendor]}">●</span> GPU ${g.index}</div>`).join('');
+  $('#sysLine').innerHTML = `Uptime ${Math.floor(s.uptime / 86400)}d ${Math.floor(s.uptime % 86400 / 3600)}h<br>Load ${s.cpu.load.map(x => x.toFixed(2)).join(' ')}`;
+  $('#gpuCards').innerHTML = s.gpus.map(g => {
+    const vp = g.vram_total_mb ? g.vram_used_mb / g.vram_total_mb * 100 : 0;
+    return `<div class="card p-4">
+      <div class="flex justify-between items-start gap-2">
+        <div class="min-w-0"><div class="text-xs font-bold" style="color:${vendorColor[g.vendor]}">GPU ${g.index} · ${esc(g.vendor)}</div>
+        <div class="font-semibold truncate" title="${esc(g.name)}">${esc(g.name)}</div></div>
+        <div class="text-right"><div class="text-2xl font-bold ${g.temp > 83 ? 'text-red-400' : ''}">${g.temp != null ? Math.round(g.temp) + '°' : '–'}</div><div class="text-xs text-slate-500">${g.power_w != null ? Math.round(g.power_w) + ' W' : ''}</div></div>
+      </div>
+      <div class="mt-3 text-sm flex justify-between"><span class="text-slate-400">VRAM</span><span>${((g.vram_used_mb || 0) / 1024).toFixed(1)} / ${((g.vram_total_mb || 0) / 1024).toFixed(1)} GB</span></div>
+      <div class="bar mt-1"><div class="${usageColor(vp)}" style="width:${vp}%"></div></div>
+      <div class="mt-3 text-sm flex justify-between"><span class="text-slate-400">Utilization</span><span>${g.util != null ? Math.round(g.util) + '%' : '–'}</span></div>
+      <div class="bar mt-1"><div class="bg-violet-500" style="width:${g.util || 0}%"></div></div>
+    </div>`;
+  }).join('') || `<div class="card p-6 text-slate-400 sm:col-span-2 lg:col-span-3">No GPU telemetry. For NVIDIA, check <code>nvidia-smi</code> works; AMD cards are read from the amdgpu driver.</div>`;
+  const sc = (t, v, p, sub) => `<div class="card p-4"><div class="text-slate-400 text-sm">${t}</div><div class="text-xl font-bold mt-1">${v}</div>${p != null ? `<div class="bar mt-2"><div class="${usageColor(p)}" style="width:${p}%"></div></div>` : ''}<div class="text-xs text-slate-500 mt-1 truncate">${sub || ''}</div></div>`;
+  $('#sysCards').innerHTML = sc('CPU', s.cpu.percent.toFixed(0) + '%', s.cpu.percent, `${s.cpu.cores} threads · ${esc(s.cpu.model)}`)
+    + sc('RAM', `${gb(s.ram.used)} / ${gb(s.ram.total)} GB`, s.ram.percent)
+    + sc('Disk /', `${gb(s.disk.used)} / ${gb(s.disk.total)} GB`, s.disk.percent)
+    + sc('Network', `↓ ${fmtBytes(s.net.rx_bps)}/s`, null, `↑ ${fmtBytes(s.net.tx_bps)}/s`);
+}
+
+// ===================================================================== tasks
+let knownTasks = {}, taskCallbacks = {};
+function onTaskDone(id, cb) { taskCallbacks[id] = cb; }
+async function pollTasks() {
+  let list; try { list = await api('/api/tasks'); } catch { return; }
+  const running = list.filter(t => t.status === 'running');
+  $('#taskCount').textContent = running.length; $('#taskCount').classList.toggle('hidden', !running.length);
+  for (const t of list) {
+    const prev = knownTasks[t.id];
+    if (prev && prev.status === 'running' && t.status !== 'running') {
+      toast(`${t.title}: ${t.status === 'done' ? 'done ✓' : 'failed ✗'}`, t.status === 'done' ? 'ok' : 'err');
+      if (taskCallbacks[t.id]) { taskCallbacks[t.id](t); delete taskCallbacks[t.id]; }
+    }
+    knownTasks[t.id] = t;
+  }
+  // inline progress bars
+  for (const t of running) $$(`[data-task-prog="${t.id}"]`).forEach(el => {
+    el.classList.remove('hidden');
+    el.querySelector('.fill').style.width = (t.progress ?? 5) + '%';
+    el.querySelector('.txt').textContent = (t.progress != null ? t.progress.toFixed(0) + '% ' : '') + (t.total ? `${fmtBytes(t.completed)} / ${fmtBytes(t.total)} ` : '') + (t.message || '');
+  });
+  if (!$('#drawer').classList.contains('hidden')) renderTasks(list);
+}
+function renderTasks(list) {
+  $('#taskList').innerHTML = list.map(t => `<div class="card p-3 text-sm">
+    <div class="flex justify-between gap-2"><b class="truncate">${esc(t.title)}</b>
+    <span class="pill ${t.status === 'running' ? 'bg-accent-600' : t.status === 'done' ? 'bg-green-800' : 'bg-red-800'}">${t.status}</span></div>
+    ${t.status === 'running' ? `<div class="bar mt-2"><div class="bg-accent-500" style="width:${t.progress ?? 5}%"></div></div>` : ''}
+    <div class="text-xs text-slate-400 mt-1 truncate">${esc(t.message)}</div>
+    <button class="text-xs text-accent-400 mt-1" onclick="showTaskLog('${t.id}')">View log</button></div>`).join('') || '<p class="text-slate-500 text-sm">No tasks yet.</p>';
+}
+async function showTaskLog(id) {
+  const t = await api('/api/tasks/' + id);
+  openModal(t.title, `<pre class="log">${esc(t.log.join('\n'))}</pre>`);
+}
+function toggleDrawer(show) { $('#drawer').classList.toggle('hidden', !show); if (show) api('/api/tasks').then(renderTasks); }
+$('#tasksBtn').onclick = () => toggleDrawer($('#drawer').classList.contains('hidden'));
+const progHtml = id => `<div data-task-prog="${id}" class="mt-2"><div class="bar"><div class="fill bg-accent-500" style="width:2%"></div></div><div class="txt text-xs text-slate-400 mt-1 truncate">Starting...</div></div>`;
+
+// ===================================================================== Ollama
+async function loadOllama() {
+  const st = await api('/api/ollama/status').catch(() => ({ running: false }));
+  $('#ollamaStatus').innerHTML = st.running ? `<span class="text-green-400">● running</span> · Ollama ${esc(st.version)}` : `<span class="text-red-400">● not reachable</span> · run <code>systemctl status ollama</code> in the Terminal tab`;
+  let models = [];
+  if (st.running) models = await api('/api/ollama/models').catch(e => (toast(e.message, 'err'), []));
+  $('#ollamaModels').innerHTML = models.map(m => `<div class="py-3 flex flex-wrap items-center gap-3">
+      <div class="flex-1 min-w-[200px]"><div class="font-semibold">${esc(m.name)} ${m.loaded ? `<span class="pill bg-green-900 text-green-300">loaded · ${gb(m.vram || 0)} GB VRAM</span>` : ''}</div>
+      <div class="text-xs text-slate-400">${gb(m.size)} GB · ${esc(m.params || '')} ${esc(m.quant || '')} · ${esc(m.family || '')}</div>
+      <div id="mp-${btoa(m.name).replace(/=/g, '')}"></div></div>
+      <div class="flex gap-2">
+        ${m.loaded ? `<button class="btn btn-g" onclick="unloadModel('${esc(m.name)}')">Unload</button>` : ''}
+        <button class="btn btn-g" onclick="pullModel('${esc(m.name)}', this)">Update</button>
+        <button class="btn btn-d" onclick="deleteModel('${esc(m.name)}')">Delete</button>
+      </div></div>`).join('') || `<p class="py-4 text-slate-500">No models yet. Pick one from the library below.</p>`;
+  if (!window._lib) window._lib = await api('/api/ollama/library').catch(() => []);
+  renderLibrary(models.map(m => m.name));
+}
+function renderLibrary(installed = window._installed || []) {
+  window._installed = installed;
+  const f = $('#libFilter').value.toLowerCase();
+  const vram = Number($('#poolTotal').textContent) || 0;
+  $('#library').innerHTML = (window._lib || []).filter(m => !f || (m.name + m.desc + m.family).toLowerCase().includes(f)).map(m => {
+    const have = installed.some(n => n === m.name || n === m.name + ':latest');
+    const fits = !vram || m.size_gb * 1.15 <= vram;
+    return `<div class="bg-ink-850 border border-ink-800 rounded-xl p-3 flex flex-col">
+      <div class="flex justify-between gap-2"><b>${esc(m.name)}</b><span class="pill ${fits ? 'bg-ink-700' : 'bg-amber-900 text-amber-200'}" title="${fits ? 'Fits in GPU pool' : 'Bigger than your VRAM pool - will use CPU/RAM too'}">${m.size_gb} GB</span></div>
+      <div class="text-xs text-slate-400 flex-1 mt-1">${esc(m.desc)}</div>
+      <div id="lp-${m.name.replace(/[^a-z0-9]/gi, '')}"></div>
+      <button class="btn ${have ? 'btn-g' : 'btn-p'} mt-2" onclick="pullModel('${m.name}', this)">${have ? '✓ Installed · re-pull' : '⬇ Install'}</button></div>`;
+  }).join('');
+}
+$('#libFilter').oninput = () => renderLibrary();
+async function pullModel(name, btn) {
+  await guard(async () => {
+    const { task } = await post('/api/ollama/pull', { name });
+    const slot = btn?.parentElement?.querySelector?.('[id^="lp-"],[id^="mp-"]') || btn?.closest('div.py-3, div.rounded-xl')?.querySelector('[id^="lp-"],[id^="mp-"]');
+    if (slot) slot.innerHTML = progHtml(task);
+    onTaskDone(task, () => loadOllama());
+  }, btn);
+}
+$('#pullBtn').onclick = () => { const n = $('#pullName').value.trim(); if (n) guard(async () => { const { task } = await post('/api/ollama/pull', { name: n }); $('#ollamaModels').insertAdjacentHTML('afterbegin', `<div class="py-3"><b>${esc(n)}</b>${progHtml(task)}</div>`); onTaskDone(task, loadOllama); $('#pullName').value = ''; }, $('#pullBtn')); };
+$('#updateAllModels').onclick = e => guard(async () => { const { task } = await post('/api/ollama/update-all'); toast('Updating all models...'); toggleDrawer(true); onTaskDone(task, loadOllama); }, e.target);
+async function deleteModel(n) { if (!confirm(`Delete ${n}?`)) return; await guard(() => post('/api/ollama/delete', { name: n })); loadOllama(); }
+async function unloadModel(n) { await guard(() => post('/api/ollama/unload', { name: n })); setTimeout(loadOllama, 800); }
+
+// ===================================================================== llama.cpp
+async function loadLlama() {
+  const s = await api('/api/llama/status').catch(e => (toast(e.message, 'err'), null)); if (!s) return;
+  const c = s.config;
+  $('#llamaBadge').innerHTML = !s.installed ? '<span class="pill bg-red-900 text-red-200">not installed</span>'
+    : s.service === 'active' ? `<span class="pill bg-green-900 text-green-300">running · ${esc(s.health)}</span>` : `<span class="pill bg-ink-700">${esc(s.service || 'stopped')}</span>`;
+  $('#llamaApi').textContent = `http://${c.host === '0.0.0.0' ? HOST : '127.0.0.1'}:${c.port}/v1`;
+  const tot = s.devices.reduce((a, d) => a + d.total_mb, 0);
+  $('#llamaDevices').innerHTML = s.devices.map(d => `<div class="bg-ink-850 border border-ink-800 rounded-xl p-3 text-sm">
+     <div class="flex justify-between"><b>${esc(d.id)}</b><span>${(d.total_mb / 1024).toFixed(1)} GB</span></div>
+     <div class="text-slate-400 truncate">${esc(d.name)}</div>
+     <div class="text-xs text-accent-400 mt-1">gets ~${tot ? Math.round(d.total_mb / tot * 100) : 0}% of layers</div></div>`).join('')
+    || `<p class="text-sm text-slate-500">${s.installed ? 'No Vulkan GPUs found by llama.cpp. Check drivers with: vulkaninfo --summary' : 'Re-run install_app.sh to install llama.cpp.'}</p>`;
+  if (s.auto_split) $('#lTs').placeholder = `auto = ${s.auto_split}`;
+  const models = await api('/api/llama/models').catch(() => []);
+  $('#lModel').innerHTML = '<option value="">— choose a GGUF —</option>' + models.map(m => `<option value="${esc(m.name)}" ${m.name === c.model ? 'selected' : ''}>${esc(m.name)} (${gb(m.size)} GB${m.shards > 1 ? `, ${m.shards} parts` : ''})</option>`).join('');
+  $('#lCtx').value = c.ctx; $('#lNgl').value = c.ngl; $('#lSplit').value = c.split_mode; $('#lTs').value = c.tensor_split;
+  $('#lDev').value = c.devices; $('#lHost').value = c.host; $('#lPort').value = c.port; $('#lExtra').value = c.extra;
+  $('#ggufList').innerHTML = models.map(m => `<div class="py-2 flex items-center gap-3 text-sm">
+    <div class="flex-1 min-w-0"><div class="truncate font-medium">${esc(m.name)}</div><div class="text-xs text-slate-400">${gb(m.size)} GB ${m.size / 1048576 > tot && tot ? '<span class="text-amber-400">· larger than GPU pool, rest goes to RAM</span>' : ''}</div></div>
+    <button class="btn btn-g" onclick="importToOllama('${esc(m.name)}')">→ Ollama</button>
+    <button class="btn btn-d" onclick="deleteGguf('${esc(m.name)}')">Delete</button></div>`).join('') || '<p class="text-sm text-slate-500 py-2">No GGUF files yet. Download one below.</p>';
+}
+function llamaBody() { return { model: $('#lModel').value, ctx: +$('#lCtx').value, ngl: +$('#lNgl').value, split_mode: $('#lSplit').value, tensor_split: $('#lTs').value.trim() || 'auto', devices: $('#lDev').value.trim(), host: $('#lHost').value, port: +$('#lPort').value, extra: $('#lExtra').value }; }
+$('#lSave').onclick = e => guard(async () => { await post('/api/llama/config', llamaBody()); $('#lSaved').textContent = 'Saved ✓'; setTimeout(() => $('#lSaved').textContent = '', 2000); }, e.target);
+$('#llamaStart').onclick = e => guard(async () => { await post('/api/llama/config', llamaBody()); await post('/api/llama/service/start'); toast('llama-server starting... loading a big model can take a minute'); setTimeout(loadLlama, 3000); }, e.target);
+$('#llamaStop').onclick = e => guard(async () => { await post('/api/llama/service/stop'); loadLlama(); }, e.target);
+$('#llamaLogs').onclick = async () => { const l = await api('/api/llama/logs'); $('#llamaLog').textContent = l.log; $('#llamaLog').classList.toggle('hidden'); $('#llamaLog').scrollTop = 1e9; };
+$('#hfList').onclick = e => guard(async () => {
+  const repo = $('#hfRepo').value.trim(); const files = await api('/api/hf/files?repo=' + encodeURIComponent(repo));
+  $('#hfFiles').innerHTML = files.map(f => `<div class="py-2"><div class="flex items-center gap-2"><div class="flex-1 min-w-0 truncate" title="${esc(f.path)}">${esc(f.path.split('/').pop())}</div><span class="text-slate-400 text-xs">${gb(f.size)} GB</span>
+    <button class="btn btn-g !py-1" onclick="hfDownload('${esc(repo)}','${esc(f.path)}', this)">⬇</button></div><div class="slot"></div></div>`).join('') || '<p class="text-slate-500 py-2">No .gguf files in this repo.</p>';
+}, e.target);
+async function hfDownload(repo, path, btn) {
+  await guard(async () => { const { task } = await post('/api/llama/download', { repo, path }); btn.closest('.py-2').querySelector('.slot').innerHTML = progHtml(task); onTaskDone(task, loadLlama); }, btn);
+}
+$('#urlGgufBtn').onclick = e => guard(async () => { const { task } = await post('/api/llama/download-url', { url: $('#urlGguf').value.trim() }); $('#urlGguf').insertAdjacentHTML('afterend', progHtml(task)); onTaskDone(task, loadLlama); }, e.target);
+$('#upGgufBtn').onclick = () => {
+  const f = $('#upGguf').files[0]; if (!f) return toast('Choose a .gguf file first', 'err');
+  const xhr = new XMLHttpRequest(); const bar = $('#upProg'); bar.classList.remove('hidden');
+  xhr.open('PUT', '/api/llama/upload?filename=' + encodeURIComponent(f.name)); xhr.setRequestHeader('X-Requested-With', 'aipanel');
+  xhr.upload.onprogress = e => bar.firstElementChild.style.width = (e.loaded / e.total * 100) + '%';
+  xhr.onload = () => { bar.classList.add('hidden'); if (xhr.status === 200) { toast('Upload complete'); loadLlama(); } else toast('Upload failed: ' + xhr.responseText, 'err'); };
+  xhr.onerror = () => toast('Upload failed', 'err'); xhr.send(f);
+};
+async function deleteGguf(n) { if (!confirm('Delete ' + n + '?')) return; await guard(() => post('/api/llama/delete-model', { name: n })); loadLlama(); }
+async function importToOllama(gguf) {
+  const name = prompt('Name for this model in Ollama:', gguf.split('/').pop().replace(/\.gguf$/i, '').replace(/-0000\d-of-\d+$/, '').toLowerCase().replace(/[^a-z0-9.\-_:]/g, '-'));
+  if (!name) return; await guard(async () => { const { task } = await post('/api/ollama/import', { gguf, name }); toggleDrawer(true); onTaskDone(task, loadOllama); });
+}
+
+// ===================================================================== App Store
+let appsCache = [], appCat = 'All', gpuVendors = [];
+async function loadApps() {
+  const r = await api('/api/apps').catch(e => (toast(e.message, 'err'), null)); if (!r) return;
+  appsCache = r.apps; gpuVendors = r.gpu_vendors;
+  $('#dockerWarn').classList.toggle('hidden', r.docker); $('#dockerWarn').textContent = 'Docker is not installed. Re-run install_app.sh.';
+  const cats = ['All', 'Installed', ...new Set(appsCache.map(a => a.category))];
+  $('#catBtns').innerHTML = cats.map(c => `<button class="btn ${c === appCat ? 'btn-p' : 'btn-g'} !py-1" onclick="appCat='${esc(c)}';renderApps()">${esc(c)}</button>`).join('');
+  renderApps();
+}
+const statusPill = { running: 'bg-green-900 text-green-300', stopped: 'bg-ink-700 text-slate-300', partial: 'bg-amber-900 text-amber-200', not_installed: '' };
+function appUrl(a) { return a.port ? `${a.scheme}://${HOST}:${a.port}${a.path || '/'}` : null; }
+function renderApps() {
+  $$('#catBtns button').forEach(b => { b.classList.toggle('btn-p', b.textContent === appCat); b.classList.toggle('btn-g', b.textContent !== appCat); });
+  const f = $('#appFilter').value.toLowerCase();
+  const list = appsCache.filter(a => (appCat === 'All' || (appCat === 'Installed' ? a.installed : a.category === appCat)) && (!f || (a.name + a.description + a.category).toLowerCase().includes(f)));
+  $('#appGrid').innerHTML = list.map(a => {
+    const url = appUrl(a);
+    return `<div class="card p-4 flex flex-col">
+      <div class="flex gap-3 items-start"><div class="text-3xl">${esc(a.icon || '📦')}</div>
+        <div class="min-w-0 flex-1"><div class="font-bold flex items-center gap-2 flex-wrap">${esc(a.name)} ${a.gpu ? '<span class="pill bg-violet-900 text-violet-200">GPU</span>' : ''}${a.custom ? '<span class="pill bg-ink-700">custom</span>' : ''}</div>
+        <div class="text-xs text-slate-500">${esc(a.category)}${a.port ? ' · port ' + a.port : ''}</div></div>
+        ${a.installed ? `<span class="pill ${statusPill[a.status]}">${a.status}</span>` : ''}</div>
+      <p class="text-sm text-slate-400 mt-2 flex-1">${esc(a.description)}</p>
+      <div id="ap-${a.id}"></div>
+      <div class="flex flex-wrap gap-2 mt-3">
+      ${!a.installed ? `<button class="btn btn-p" onclick="installDialog('${a.id}')">⬇ Install</button>${a.custom ? `<button class="btn btn-g" onclick="removeCustom('${a.id}')">Remove</button>` : ''}` : `
+        ${url && a.status !== 'stopped' ? `<a class="btn btn-s" href="${url}" target="_blank" rel="noopener">↗ Open</a>` : ''}
+        ${a.status === 'running' ? `<button class="btn btn-g" onclick="appAction('${a.id}','stop')">■ Stop</button>` : `<button class="btn btn-s" onclick="appAction('${a.id}','start')">▶ Start</button>`}
+        <button class="btn btn-g" onclick="appAction('${a.id}','update')" title="Pull latest image and recreate">🔄</button>
+        <button class="btn btn-g" onclick="appMenu('${a.id}')">⋯</button>`}
+      </div></div>`;
+  }).join('') || '<p class="text-slate-500">No apps match.</p>';
+}
+$('#appFilter').oninput = renderApps;
+function installDialog(id) {
+  const a = appsCache.find(x => x.id === id);
+  const gpuSel = a.gpu ? `<label class="block text-sm">GPU passthrough<select id="iGpu" class="inp mt-1">
+     <option value="auto">Auto (${gpuVendors.includes('nvidia') ? 'NVIDIA' : gpuVendors.includes('amd') ? 'AMD' : 'none found'})</option>
+     <option value="nvidia">NVIDIA (CUDA)</option><option value="amd">AMD (ROCm)</option><option value="none">CPU only</option></select></label>` : '';
+  openModal(`Install ${a.name}`, `<div class="space-y-3">
+    <p class="text-sm text-slate-400">${esc(a.description)}</p>
+    ${a.notes ? `<div class="text-sm bg-ink-850 border border-ink-800 rounded-lg p-3">💡 ${esc(a.notes)}</div>` : ''}
+    ${a.port ? `<label class="block text-sm">Port<input id="iPort" type="number" class="inp mt-1" value="${a.port}"></label>` : ''}
+    ${gpuSel}
+    ${(a.inputs || []).map(i => `<label class="block text-sm">${esc(i.label)}${i.required ? ' *' : ''}<input data-key="${esc(i.key)}" type="${i.secret ? 'password' : 'text'}" class="inp mt-1 iInput" value="${esc(i.default || '')}">${i.help ? `<span class="text-xs text-slate-500">${esc(i.help)}</span>` : ''}</label>`).join('')}
+    <details class="text-sm"><summary class="cursor-pointer text-slate-400">View docker-compose.yml</summary><pre id="iCompose" class="log mt-2">loading...</pre></details>
+    <div class="flex justify-end gap-2"><button class="btn btn-g" onclick="closeModal()">Cancel</button><button id="iGo" class="btn btn-p">Install</button></div></div>`);
+  api(`/api/apps/${id}/compose`).then(c => $('#iCompose').textContent = c.compose);
+  $('#iGo').onclick = e => guard(async () => {
+    const inputs = {}; $$('.iInput').forEach(i => inputs[i.dataset.key] = i.value);
+    const body = { inputs, gpu: $('#iGpu')?.value || 'auto' }; if ($('#iPort')) body.port = +$('#iPort').value;
+    const { task } = await post(`/api/apps/${id}/install`, body); closeModal();
+    $('#ap-' + id).innerHTML = progHtml(task); toast(`Installing ${a.name}...`);
+    onTaskDone(task, loadApps);
+  }, e.target);
+}
+async function appAction(id, action, purge = false) {
+  await guard(async () => {
+    const { task } = await post(`/api/apps/${id}/${action}${purge ? '?purge=true' : ''}`);
+    const slot = $('#ap-' + id); if (slot) slot.innerHTML = progHtml(task);
+    onTaskDone(task, loadApps);
+  });
+}
+function appMenu(id) {
+  const a = appsCache.find(x => x.id === id);
+  openModal(a.name, `<div class="space-y-3">
+    <div class="text-sm">${a.containers.map(c => `<div class="flex justify-between border-b border-ink-800 py-1"><span>${esc(c.name)}</span><span class="text-slate-400">${esc(c.status)}</span></div>`).join('')}</div>
+    <div class="flex flex-wrap gap-2">
+      <button class="btn btn-g" onclick="appAction('${id}','restart');closeModal()">↻ Restart</button>
+      <button class="btn btn-g" onclick="appLogs('${id}')">📜 Logs</button>
+      <button class="btn btn-g" onclick="appSecrets('${id}')">🔑 Secrets</button>
+      <button class="btn btn-g" onclick="installDialog('${id}')">⚙ Reconfigure</button>
+      <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)}? Data is kept.')){appAction('${id}','uninstall');closeModal()}">Uninstall</button>
+      <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)} AND DELETE ALL ITS DATA? This cannot be undone.')){appAction('${id}','uninstall',true);closeModal()}">Uninstall + delete data</button>
+    </div><pre id="appLog" class="log hidden"></pre><div id="appSec" class="text-sm font-mono"></div></div>`);
+}
+async function appLogs(id) { const l = await api(`/api/apps/${id}/logs`); $('#appLog').textContent = l.log || '(no output)'; $('#appLog').classList.remove('hidden'); $('#appLog').scrollTop = 1e9; }
+async function appSecrets(id) { const s = await api(`/api/apps/${id}/secrets`); $('#appSec').innerHTML = Object.entries(s).map(([k, v]) => `<div><span class="text-slate-400">${esc(k)}</span> = <span class="select-all">${esc(v)}</span></div>`).join(''); }
+$('#updateAllApps').onclick = e => guard(async () => { if (!confirm('Pull the latest images and recreate every installed app?')) return; const { task } = await post('/api/apps-update-all'); toggleDrawer(true); onTaskDone(task, loadApps); }, e.target);
+async function removeCustom(id) { await guard(() => api('/api/apps-custom/' + id, { method: 'DELETE' })); loadApps(); }
+$('#customBtn').onclick = () => {
+  openModal('Add a custom app', `<div class="space-y-3 text-sm">
+    <p class="text-slate-400">Paste a Docker Compose file, load one from your computer, or fetch it from a URL (GitHub links work). Use <code>\${DATA_DIR}</code> for persistent folders.</p>
+    <div class="flex gap-2"><input id="cUrl" class="inp" placeholder="https://github.com/user/repo/blob/main/docker-compose.yml"><button id="cFetch" class="btn btn-g">Fetch</button></div>
+    <div><input id="cFile" type="file" accept=".yml,.yaml,.txt" class="inp"></div>
+    <div class="grid grid-cols-2 gap-2">
+      <label>App ID<input id="cId" class="inp mt-1" placeholder="my-app"></label>
+      <label>Name<input id="cName" class="inp mt-1" placeholder="My App"></label>
+      <label>Web port (for Open button)<input id="cPort" type="number" class="inp mt-1"></label>
+      <label>Path<input id="cPath" class="inp mt-1" value="/"></label>
+    </div>
+    <label class="block">docker-compose.yml<textarea id="cYaml" rows="12" class="inp mt-1 font-mono text-xs" placeholder="services:\n  myapp:\n    image: nginx:latest\n    ports:\n      - '8099:80'\n    volumes:\n      - \${DATA_DIR}/html:/usr/share/nginx/html"></textarea></label>
+    <div class="flex justify-end gap-2"><button class="btn btn-g" onclick="closeModal()">Cancel</button><button id="cSave" class="btn btn-g">Save to store</button><button id="cSaveInstall" class="btn btn-p">Save &amp; install</button></div></div>`);
+  const fill = r => { $('#cYaml').value = r.compose; if (r.suggested_port && !$('#cPort').value) $('#cPort').value = r.suggested_port; if (!$('#cId').value && r.suggested_id) { $('#cId').value = r.suggested_id; $('#cName').value = r.suggested_id; } };
+  $('#cFetch').onclick = e => guard(async () => fill(await api('/api/apps-custom/fetch?url=' + encodeURIComponent($('#cUrl').value.trim()))), e.target);
+  $('#cFile').onchange = async () => { const f = $('#cFile').files[0]; if (!f) return; $('#cYaml').value = await f.text(); const m = $('#cYaml').value.match(/["']?(\d{2,5}):\d+["']?/); if (m && !$('#cPort').value) $('#cPort').value = m[1]; if (!$('#cId').value) { const id = f.name.replace(/\.(ya?ml|txt)$/, '').replace(/docker-compose|compose/g, '').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase() || 'my-app'; $('#cId').value = id; $('#cName').value = id; } };
+  const save = async () => { await post('/api/apps-custom', { id: $('#cId').value.trim(), name: $('#cName').value.trim() || $('#cId').value.trim(), port: +$('#cPort').value || null, path: $('#cPath').value || '/', compose: $('#cYaml').value }); };
+  $('#cSave').onclick = e => guard(async () => { await save(); closeModal(); toast('Saved to App Store'); await loadApps(); }, e.target);
+  $('#cSaveInstall').onclick = e => guard(async () => { await save(); const id = $('#cId').value.trim(); closeModal(); await loadApps(); const { task } = await post(`/api/apps/${id}/install`, {}); $('#ap-' + id).innerHTML = progHtml(task); onTaskDone(task, loadApps); }, e.target);
+};
+
+// ===================================================================== Terminal
+const term = { x: null, fit: null, ws: null };
+function openTerminal() {
+  if (!term.x) {
+    term.x = new Terminal({ cursorBlink: true, fontSize: 14, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', theme: { background: '#05080e', foreground: '#d1d9e6', cursor: '#38bdf8' }, scrollback: 5000 });
+    term.fit = new FitAddon.FitAddon(); term.x.loadAddon(term.fit); term.x.open($('#terminal'));
+    term.x.onData(d => term.ws?.readyState === 1 && term.ws.send(JSON.stringify({ type: 'input', data: d })));
+    term.x.onResize(({ cols, rows }) => term.ws?.readyState === 1 && term.ws.send(JSON.stringify({ type: 'resize', cols, rows })));
+    window.addEventListener('resize', () => currentTab === 'term' && term.fit.fit());
+  }
+  setTimeout(() => { term.fit.fit(); term.x.focus(); }, 50);
+  if (!term.ws || term.ws.readyState > 1) connectTerm();
+}
+function connectTerm() {
+  if (term.ws) try { term.ws.close(); } catch { }
+  const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/terminal`);
+  ws.binaryType = 'arraybuffer'; term.ws = ws;
+  ws.onopen = () => { $('#termState').textContent = 'connected'; $('#termState').className = 'pill bg-green-900 text-green-300 ml-2'; term.fit.fit(); ws.send(JSON.stringify({ type: 'resize', cols: term.x.cols, rows: term.x.rows })); };
+  ws.onmessage = e => term.x.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data));
+  ws.onclose = () => { $('#termState').textContent = 'disconnected'; $('#termState').className = 'pill bg-ink-800 ml-2'; term.x.write('\r\n\x1b[33m[session closed - click Reconnect]\x1b[0m\r\n'); };
+}
+$('#termReconnect').onclick = () => { term.x.clear(); connectTerm(); term.x.focus(); };
+
+// ===================================================================== Settings
+async function loadSettings() {
+  const i = await api('/api/system/info').catch(() => null);
+  if (i) { $('#sysInfo').innerHTML = `Panel v${esc(i.version)} · ${esc(i.os)}<br>${esc(i.ollama || 'Ollama not found')} · ${esc(i.docker || 'Docker not found')}`; $('#updUrl').value = i.update_url || ''; }
+  const r = await api('/api/apps').catch(() => ({ apps: [] }));
+  $('#secApp').innerHTML = r.apps.filter(a => a.installed).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('') || '<option value="">No apps installed</option>';
+}
+$('#secShow').onclick = async () => { const id = $('#secApp').value; if (!id) return; const s = await api(`/api/apps/${id}/secrets`); $('#secOut').innerHTML = Object.entries(s).map(([k, v]) => `<div><span class="text-slate-400">${esc(k)}</span> = <span class="select-all">${esc(v)}</span></div>`).join(''); };
+$('#pwBtn').onclick = e => guard(async () => { await post('/api/change-password', { current: $('#pwCur').value, new: $('#pwNew').value }); $('#pwMsg').textContent = 'Password changed ✓'; $('#pwMsg').className = 'text-sm text-green-400'; $('#pwCur').value = $('#pwNew').value = ''; }, e.target);
+const updMsg = (t, ok = true) => { $('#updMsg').textContent = t; $('#updMsg').className = 'text-sm ' + (ok ? 'text-green-400' : 'text-red-400'); };
+$('#updUrlSave').onclick = e => guard(async () => { await post('/api/system/update-url', { url: $('#updUrl').value.trim() }); updMsg('Saved ✓'); }, e.target);
+$('#updCatalog').onclick = e => guard(async () => { await post('/api/system/update-url', { url: $('#updUrl').value.trim() }); const r = await post('/api/system/update-catalog'); updMsg(`Catalog refreshed: ${r.apps} apps ✓`); }, e.target);
+$('#updPanel').onclick = e => guard(async () => {
+  if (!confirm('Download the latest panel and restart it? A backup of the current files is kept.')) return;
+  await post('/api/system/update-url', { url: $('#updUrl').value.trim() }); const r = await post('/api/system/update-panel');
+  updMsg('Updated. Restarting... the page reloads in 5 seconds. Backup: ' + r.backup); setTimeout(() => location.reload(), 5000);
+}, e.target);
+$('#updEngines').onclick = e => guard(async () => { const { task } = await post('/api/system/update-engines'); toggleDrawer(true); onTaskDone(task, loadSettings); }, e.target);
+
+start();
+</script>
+</body>
+</html>
