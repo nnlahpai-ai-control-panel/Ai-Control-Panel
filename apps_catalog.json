@@ -8,7 +8,7 @@
       "icon": "💬",
       "port": 3000,
       "description": "ChatGPT-style UI for your local Ollama and llama.cpp models (RAG, users, voice).",
-      "compose": "services:\n  open-webui:\n    image: ghcr.io/open-webui/open-webui:main\n    restart: unless-stopped\n    network_mode: host\n    environment:\n      PORT: ${APP_PORT}\n      OLLAMA_BASE_URL: http://127.0.0.1:11434\n      OPENAI_API_BASE_URL: http://127.0.0.1:8081/v1\n      OPENAI_API_KEY: none\n      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/data:/app/backend/data\n",
+      "compose": "services:\n  open-webui:\n    image: ghcr.io/open-webui/open-webui:main\n    restart: unless-stopped\n    network_mode: host\n    environment:\n      PORT: ${APP_PORT}\n      OLLAMA_BASE_URL: http://127.0.0.1:11434\n      OPENAI_API_BASE_URL: http://127.0.0.1:8081/v1\n      OPENAI_API_KEY: none\n      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY}\n      TZ: ${TZ}\n      ENABLE_WEB_SEARCH: ${ENABLE_WEB_SEARCH:-false}\n      WEB_SEARCH_ENGINE: ${WEB_SEARCH_ENGINE:-}\n      SEARXNG_QUERY_URL: ${SEARXNG_QUERY_URL:-}\n      AUDIO_TTS_ENGINE: ${AUDIO_TTS_ENGINE:-}\n      AUDIO_TTS_OPENAI_API_BASE_URL: ${AUDIO_TTS_OPENAI_API_BASE_URL:-http://127.0.0.1:8081/v1}\n      AUDIO_TTS_OPENAI_API_KEY: ${AUDIO_TTS_OPENAI_API_KEY:-none}\n      AUDIO_TTS_MODEL: ${AUDIO_TTS_MODEL:-tts-1}\n      AUDIO_TTS_VOICE: ${AUDIO_TTS_VOICE:-alloy}\n    volumes:\n      - ${DATA_DIR}/data:/app/backend/data\n",
       "env": {
         "WEBUI_SECRET_KEY": "{{random_hex}}"
       },
@@ -133,11 +133,15 @@
       "icon": "🔎",
       "port": 8888,
       "description": "Private meta search engine. Great as web search for Open WebUI and agents.",
-      "compose": "services:\n  searxng:\n    image: searxng/searxng:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8080\"\n    environment:\n      SEARXNG_BASE_URL: http://${HOST_IP}:${APP_PORT}/\n      SEARXNG_SECRET: ${SEARXNG_SECRET}\n    volumes:\n      - ${DATA_DIR}/config:/etc/searxng\n",
+      "compose": "services:\n  searxng:\n    image: searxng/searxng:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8080\"\n    environment:\n      SEARXNG_BASE_URL: http://${HOST_IP}:${APP_PORT}/\n      GRANIAN_HOST: 0.0.0.0\n      SEARXNG_SECRET: ${SEARXNG_SECRET}\n    volumes:\n      - ${DATA_DIR}/config:/etc/searxng\n",
       "env": {
         "SEARXNG_SECRET": "{{random_hex}}"
       },
-      "website": "https://docs.searxng.org"
+      "website": "https://docs.searxng.org",
+      "write_files": {
+        "config/settings.yml": "use_default_settings: true\nserver:\n  limiter: false\n  image_proxy: true\nsearch:\n  formats:\n    - html\n    - json\n"
+      },
+      "notes": "JSON output is switched on, so Open WebUI and agents can use it: http://127.0.0.1:8888/search?q=<query>"
     },
     {
       "id": "qdrant",
@@ -438,9 +442,17 @@
       "icon": "🎞️",
       "port": 8501,
       "description": "Auto-create short videos from a topic: AI writes the script, adds stock footage, voice-over, subtitles and music.",
-      "compose": "services:\n  webui:\n    image: ghcr.io/harry0703/moneyprinterturbo:latest\n    restart: unless-stopped\n    network_mode: host\n    command: [\"streamlit\", \"run\", \"./webui/Main.py\", \"--server.address=0.0.0.0\", \"--server.port=${APP_PORT}\", \"--browser.gatherUsageStats=False\"]\n    volumes:\n      - ${DATA_DIR}/config.toml:/MoneyPrinterTurbo/config.toml\n      - ${DATA_DIR}/storage:/MoneyPrinterTurbo/storage\n",
+      "compose": "services:\n  webui:\n    image: ghcr.io/harry0703/moneyprinterturbo:latest\n    restart: unless-stopped\n    network_mode: host\n    command: [\"streamlit\", \"run\", \"./webui/Main.py\", \"--server.address=0.0.0.0\", \"--server.port=${APP_PORT}\", \"--browser.gatherUsageStats=False\"]\n    volumes:\n      - ${DATA_DIR}/config.toml:/MoneyPrinterTurbo/config.toml\n      - ${DATA_DIR}/storage:/MoneyPrinterTurbo/storage\n  api:\n    image: ghcr.io/harry0703/moneyprinterturbo:latest\n    restart: unless-stopped\n    network_mode: host\n    command: [\"python\", \"main.py\"]\n    volumes:\n      - ${DATA_DIR}/config.toml:/MoneyPrinterTurbo/config.toml\n      - ${DATA_DIR}/storage:/MoneyPrinterTurbo/storage\n",
       "seed_files": {
         "config.toml": "https://raw.githubusercontent.com/harry0703/MoneyPrinterTurbo/main/config.example.toml"
+      },
+      "patch_files": {
+        "config.toml": {
+          "listen_host": "127.0.0.1",
+          "llm_provider": "ollama",
+          "ollama_base_url": "http://127.0.0.1:11434/v1",
+          "ollama_model_name": "{{ollama_model}}"
+        }
       },
       "website": "https://github.com/harry0703/MoneyPrinterTurbo",
       "notes": "In the web UI choose LLM provider Ollama (base URL http://127.0.0.1:11434/v1, model e.g. qwen3:8b) or an online API, and add a free Pexels API key for stock video clips."
@@ -803,6 +815,106 @@
       "description": "Smart home automation hub.",
       "compose": "services:\n  homeassistant:\n    image: ghcr.io/home-assistant/home-assistant:stable\n    restart: unless-stopped\n    network_mode: host\n    privileged: true\n    environment:\n      TZ: ${TZ}\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /run/dbus:/run/dbus:ro\n",
       "website": "https://www.home-assistant.io"
+    }
+  ],
+  "bundles": [
+    {
+      "id": "private-chatgpt",
+      "name": "Private ChatGPT",
+      "icon": "💬",
+      "description": "Open WebUI chat on your own models, with web search (SearXNG) and natural voices (Kokoro) already switched on.",
+      "apps": [
+        "searxng",
+        "kokoro-tts",
+        "open-webui"
+      ],
+      "env": {
+        "open-webui": {
+          "ENABLE_WEB_SEARCH": "true",
+          "WEB_SEARCH_ENGINE": "searxng",
+          "SEARXNG_QUERY_URL": "http://127.0.0.1:8888/search?q=<query>",
+          "AUDIO_TTS_ENGINE": "openai",
+          "AUDIO_TTS_OPENAI_API_BASE_URL": "http://127.0.0.1:8880/v1",
+          "AUDIO_TTS_OPENAI_API_KEY": "not-needed",
+          "AUDIO_TTS_MODEL": "kokoro",
+          "AUDIO_TTS_VOICE": "af_heart"
+        }
+      },
+      "notes": "Open Open WebUI, create the first account (it becomes admin) and pick a model. Web search and read-aloud are already set up."
+    },
+    {
+      "id": "ai-video-studio",
+      "name": "AI Video Studio",
+      "icon": "🎬",
+      "description": "Make AI images and video (ComfyUI), auto-make short videos from a topic (MoneyPrinterTurbo, wired to Ollama), add voices (Kokoro), subtitles (Whisper) and edit in Kdenlive.",
+      "apps": [
+        "comfyui",
+        "kokoro-tts",
+        "whisper",
+        "moneyprinter",
+        "kdenlive"
+      ],
+      "notes": "MoneyPrinterTurbo already uses your local Ollama. Add a free Pexels key in its settings for stock clips. Finished videos go to the shared media folder."
+    },
+    {
+      "id": "music-studio",
+      "name": "Music Studio",
+      "icon": "🎵",
+      "description": "Write original songs with AI (ACE-Step), split vocals for karaoke (Vocal Remover), sing at home (Karaoke Eternal) and stream it all (Navidrome).",
+      "apps": [
+        "ace-step",
+        "spleeter-web",
+        "karaoke-eternal",
+        "navidrome"
+      ]
+    },
+    {
+      "id": "home-media",
+      "name": "Home Media",
+      "icon": "🍿",
+      "description": "Movies and TV (Jellyfin), photo backup with AI search (Immich), your music (Navidrome) and a file manager.",
+      "apps": [
+        "jellyfin",
+        "immich",
+        "navidrome",
+        "filebrowser"
+      ]
+    },
+    {
+      "id": "home-office",
+      "name": "Home Office",
+      "icon": "🗂️",
+      "description": "Files and calendar (Nextcloud), scanned paper documents with OCR (Paperless-ngx), PDF tools and a password manager.",
+      "apps": [
+        "nextcloud",
+        "paperless-ngx",
+        "stirling-pdf",
+        "vaultwarden"
+      ]
+    },
+    {
+      "id": "ai-automation",
+      "name": "AI Automation",
+      "icon": "⚙️",
+      "description": "Build AI workflows and agents (n8n, Flowise) with private web search (SearXNG) and a vector database (Qdrant), all on your local models.",
+      "apps": [
+        "searxng",
+        "qdrant",
+        "n8n",
+        "flowise"
+      ]
+    },
+    {
+      "id": "server-care",
+      "name": "Server Care",
+      "icon": "🩺",
+      "description": "Uptime checks with alerts (Uptime Kuma), live container logs (Dozzle), deep metrics (Netdata) and nightly app updates (Watchtower).",
+      "apps": [
+        "uptime-kuma",
+        "dozzle",
+        "netdata",
+        "watchtower"
+      ]
     }
   ]
 }

@@ -31,6 +31,21 @@
   .xterm { padding: 8px; }
   pre.log { background: #05080e; color: #a5b4c8; font-size: 12px; padding: 10px; border-radius: 9px; max-height: 360px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 </style>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
+<meta name="theme-color" content="#0b1220">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<style>
+  @media (max-width: 767px) {
+    #tabs { flex-wrap: nowrap; overflow-x: auto; width: 100%; order: 3; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    #tabs::-webkit-scrollbar { display: none; }
+    #tabs .tab { white-space: nowrap; flex: 0 0 auto; }
+    main { padding-bottom: 5rem; }
+    .btn { min-height: 2.25rem; }
+  }
+</style>
 </head>
 <body class="text-slate-200 min-h-screen">
 
@@ -53,7 +68,7 @@
 <div id="main" class="hidden">
   <header class="sticky top-0 z-30 bg-ink-950/90 backdrop-blur border-b border-ink-800">
     <div class="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3 flex-wrap">
-      <div class="flex items-center gap-2 mr-4">
+      <div class="flex items-center gap-2 mr-4 min-w-0">
         <span class="text-2xl">🧠</span>
         <div>
           <div class="font-bold leading-tight">AI Server Control</div>
@@ -65,12 +80,13 @@
         <button class="tab" data-tab="models">🤖 <span>AI Models</span></button>
         <button class="tab" data-tab="apps">🛍️ <span>App Store</span></button>
         <button class="tab" data-tab="files">📁 <span>Files</span></button>
+        <button class="tab" data-tab="logs">📜 <span>Logs</span></button>
         <button class="tab" data-tab="term">⌨️ <span>Terminal</span></button>
         <button class="tab" data-tab="settings">⚙️ <span>Settings</span></button>
       </nav>
       <div class="ml-auto flex items-center gap-2">
-        <button id="tasksBtn" class="btn btn-g relative">⏳ Tasks <span id="taskCount" class="hidden absolute -top-1 -right-1 bg-accent-500 text-white text-xs rounded-full px-1.5"></span></button>
-        <button id="logoutBtn" class="btn btn-g">Sign out</button>
+        <button id="tasksBtn" class="btn btn-g relative" title="Tasks">⏳<span class="hidden sm:inline"> Tasks</span> <span id="taskCount" class="hidden absolute -top-1 -right-1 bg-accent-500 text-white text-xs rounded-full px-1.5"></span></button>
+        <button id="logoutBtn" class="btn btn-g" title="Sign out">⏻<span class="hidden sm:inline"> Sign out</span></button>
       </div>
     </div>
   </header>
@@ -137,6 +153,24 @@
           <div class="flex gap-3 items-center"><label class="text-sm flex items-center gap-2"><input type="checkbox" id="autoRebal" class="accent-sky-500"> Auto rebalance</label><button id="rebalNow" class="btn btn-g">⚖ Rebalance now</button></div>
         </div>
         <div id="gpuEvents" class="mt-3 text-sm divide-y divide-ink-800"></div>
+      </div>
+      <div class="card p-5">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div>
+            <h2 class="text-lg font-bold">🌿 GPU eco mode</h2>
+            <p class="text-sm text-slate-400">Cap how much power the GPUs may draw. LLMs mostly wait on memory, so <b>Eco</b> usually costs only a little speed while cutting power and heat a lot. The setting is applied again after every reboot.</p>
+          </div>
+          <div class="flex gap-1" id="ecoModes">
+            <button class="btn btn-g" data-mode="max">⚡ Max</button><button class="btn btn-g" data-mode="balanced">⚖ Balanced</button><button class="btn btn-g" data-mode="eco">🌿 Eco</button><button class="btn btn-g" data-mode="custom">✎ Custom</button>
+          </div>
+        </div>
+        <div id="ecoTable" class="mt-3 overflow-x-auto"></div>
+        <div class="mt-3 flex flex-wrap gap-3 items-end text-sm">
+          <div class="text-slate-400" id="ecoCost"></div>
+          <label class="ml-auto">Electricity price per kWh <input id="ecoPrice" type="number" step="0.01" min="0" class="inp !w-24 !py-1 inline-block"></label>
+          <label>Currency <input id="ecoCur" class="inp !w-16 !py-1 inline-block" maxlength="4"></label>
+          <button id="ecoSave" class="btn btn-g !py-1">Save</button>
+        </div>
       </div>
     </section>
 
@@ -237,9 +271,32 @@
           <button id="customBtn" class="btn btn-p">＋ Custom app</button>
         </div>
       </div>
+      <div id="bundleRow" class="card p-4 admin-only">
+        <div class="flex justify-between items-center mb-2"><h2 class="font-bold">✨ 1-click bundles <span class="text-sm text-slate-400 font-normal">Apps installed together and already connected to each other</span></h2><button id="bundleToggle" class="btn btn-g !py-1 text-xs">Hide</button></div>
+        <div id="bundleGrid" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"></div>
+      </div>
       <div id="dockerWarn" class="hidden card p-4 text-amber-300"></div>
       <div id="appInfo" class="hidden card p-4"></div>
       <div id="appGrid" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"></div>
+    </section>
+
+    <!-- ---------- LOGS ---------- -->
+    <section id="tab-logs" class="hidden">
+      <div class="card p-3">
+        <div class="flex flex-wrap gap-2 items-center">
+          <select id="logSrc" class="inp !w-auto !py-1 min-w-[14rem]"></select>
+          <input id="logFilter" class="inp !py-1 !w-48" placeholder="Filter (e.g. error)">
+          <label class="text-sm text-slate-400 flex items-center gap-1"><input type="checkbox" id="logErrOnly" class="accent-sky-500"> Errors only</label>
+          <span id="logState" class="pill bg-ink-800">stopped</span>
+          <div class="ml-auto flex flex-wrap gap-2">
+            <button id="logPause" class="btn btn-g !py-1">⏸ Pause</button>
+            <button id="logClear" class="btn btn-g !py-1">Clear</button>
+            <button id="logSave" class="btn btn-g !py-1">⬇ Save</button>
+            <button id="logAsk" class="btn btn-p !py-1 admin-only">🤖 Ask local AI to fix</button>
+          </div>
+        </div>
+        <div id="logBox" class="log mt-2 font-mono text-xs" style="height: calc(100vh - 230px); min-height: 320px; overflow:auto; white-space: pre-wrap; word-break: break-all;"></div>
+      </div>
     </section>
 
     <!-- ---------- TERMINAL ---------- -->
@@ -309,6 +366,39 @@
         <p id="updMsg" class="text-sm"></p>
       </div>
       <div class="card p-5 space-y-3 lg:col-span-2 admin-only">
+        <h2 class="text-lg font-bold">📱 Phone and alerts</h2>
+        <p class="text-sm text-slate-400">Control the server from <b>Telegram</b> (status, start and stop apps, eco mode, and chat with the AI assistant) and get alerts for hot GPUs, full disks, crashed apps and GPU changes. Discord and ntfy can receive alerts too.</p>
+        <div class="grid gap-3 md:grid-cols-2 text-sm">
+          <div class="space-y-2">
+            <label class="block">Telegram bot token <span class="text-slate-500">(make a bot with <a class="text-sky-300 hover:underline" href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>)</span><input id="tgToken" class="inp mt-1 font-mono" placeholder="123456:ABC..." autocomplete="off"></label>
+            <div id="tgBot" class="text-slate-400"></div>
+            <div><div class="mb-1">Allowed chats</div><div id="tgChats" class="space-y-1"></div></div>
+          </div>
+          <div class="space-y-2">
+            <label class="block">Discord webhook URL (optional)<input id="dcHook" class="inp mt-1" placeholder="https://discord.com/api/webhooks/..."></label>
+            <label class="block">ntfy topic URL (optional)<input id="ntfyUrl" class="inp mt-1" placeholder="https://ntfy.sh/my-secret-topic"></label>
+            <div class="grid grid-cols-2 gap-2">
+              <label>Alert when a GPU reaches (°C)<input id="alTemp" type="number" class="inp mt-1"></label>
+              <label>Alert when a disk is fuller than (%)<input id="alDisk" type="number" class="inp mt-1"></label>
+            </div>
+            <label class="flex items-center gap-2"><input type="checkbox" id="alGpu" class="accent-sky-500"> GPU added, removed or crashed</label>
+            <label class="flex items-center gap-2"><input type="checkbox" id="alApp" class="accent-sky-500"> An app stopped or crashed</label>
+          </div>
+        </div>
+        <div class="flex gap-2"><button id="ntSave" class="btn btn-p">Save</button><button id="ntTest" class="btn btn-g">Send test message</button></div>
+      </div>
+      <div class="card p-5 space-y-3 lg:col-span-2 admin-only">
+        <h2 class="text-lg font-bold">🤖 AI assistant</h2>
+        <p class="text-sm text-slate-400">The 💬 button (bottom right) and the Telegram bot use this model to answer questions, read logs, and propose actions like installing apps or making a video. Nothing changes until you press the confirm button. It works best with a model that supports tools, such as <b>qwen3:8b</b>. Without a model it still understands simple commands like "install jellyfin".</p>
+        <div class="grid gap-2 md:grid-cols-4 text-sm">
+          <label>Engine<select id="asProv" class="inp mt-1"><option value="ollama">Ollama (local)</option><option value="llama">llama.cpp server (local, start it with --jinja)</option><option value="openai">Other OpenAI-compatible API</option></select></label>
+          <label>Model <span class="text-slate-500">(empty = auto)</span><input id="asModel" class="inp mt-1" placeholder="qwen3:8b"></label>
+          <label class="asOpenai">Base URL<input id="asBase" class="inp mt-1" placeholder="https://api.example.com/v1"></label>
+          <label class="asOpenai">API key<input id="asKey" type="password" class="inp mt-1" autocomplete="off"></label>
+        </div>
+        <div class="flex gap-2 items-center"><button id="asSave" class="btn btn-p">Save</button><span id="asActive" class="text-sm text-slate-400"></span></div>
+      </div>
+      <div class="card p-5 space-y-3 lg:col-span-2 admin-only">
         <div class="flex flex-wrap justify-between items-center gap-2">
           <div><h2 class="text-lg font-bold">👥 Users and roles</h2>
             <p class="text-sm text-slate-400"><b>Admin</b> can do everything. <b>User</b> only sees the apps you tick, and can open, start, stop, restart, update and read logs for them. Users can't install apps, use the terminal or files, or see the GPU and system pages.</p></div>
@@ -339,6 +429,18 @@
       </div>
     </section>
   </main>
+</div>
+
+<!-- ============ AI CHAT ============ -->
+<button id="chatFab" class="hidden fixed bottom-4 right-4 z-40 rounded-full bg-accent-500 hover:bg-accent-600 text-white shadow-lg w-12 h-12 sm:w-14 sm:h-14 text-xl sm:text-2xl" title="AI assistant">💬</button>
+<div id="chatBox" class="hidden fixed z-50 bottom-0 right-0 sm:bottom-4 sm:right-4 w-full sm:w-[420px] h-[100dvh] sm:h-[600px] sm:max-h-[85vh] card flex flex-col shadow-2xl">
+  <div class="flex items-center justify-between p-3 border-b border-ink-800">
+    <div><div class="font-bold">🤖 AI assistant</div><div id="chatModel" class="text-xs text-slate-500"></div></div>
+    <div class="flex gap-1"><button id="chatNew" class="btn btn-g !py-1 text-xs">New</button><button id="chatClose" class="btn btn-g !py-1">×</button></div>
+  </div>
+  <div id="chatMsgs" class="flex-1 overflow-auto p-3 space-y-3 text-sm"></div>
+  <div class="px-3 pb-1 flex gap-1 flex-wrap text-xs" id="chatChips"></div>
+  <form id="chatForm" class="p-3 border-t border-ink-800 flex gap-2"><input id="chatIn" class="inp flex-1" placeholder="Ask or tell me what to do..." autocomplete="off"><button class="btn btn-p">Send</button></form>
 </div>
 
 <!-- ============ MODAL ============ -->
@@ -419,10 +521,12 @@ function showTab(t) {
   currentTab = t; history.replaceState(null, '', '#' + t);
   $$('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
   $$('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + t));
-  if (t === 'dash') { loadStats(); loadPools(); loadDisks(); loadNet(); loadHistory(); loadHardware(); loadGpuEvents(); }
+  if (t === 'dash') { loadStats(); loadPools(); loadDisks(); loadNet(); loadHistory(); loadHardware(); loadGpuEvents(); loadEco(); }
   if (t === 'models') { loadPoolOptions(); loadOllama(); loadLlama(); }
   if (t === 'apps') loadApps();
   if (t === 'files') { loadPlaces(); if (!files.entries.length) openDir(files.path); }
+  if (t === 'logs') loadLogSources();
+  if (t !== 'logs' && logs.es) { logs.es.close(); logs.es = null; $('#logState').textContent = 'stopped'; }
   if (t === 'term') openTerminal();
   if (t === 'settings') loadSettings();
 }
@@ -716,6 +820,7 @@ async function loadApps() {
   appsCache = r.apps; gpuVendors = r.gpu_vendors;
   $('#dockerWarn').classList.toggle('hidden', r.docker); $('#dockerWarn').textContent = 'Docker is not installed. Re-run install_app.sh.';
   const cats = ['All', 'Installed', ...new Set(appsCache.map(a => a.category))];
+  loadBundles();
   $('#catBtns').innerHTML = cats.map(c => `<button class="btn ${c === appCat ? 'btn-p' : 'btn-g'} !py-1" onclick="appCat='${esc(c)}';renderApps()">${esc(c)}</button>`).join('');
   renderApps();
 }
@@ -928,11 +1033,12 @@ function openAppFiles(id) { closeModal(); showTab('files'); setTimeout(() => ope
 // ===================================================================== roles
 let ME = { role: 'admin', apps: [] };
 const isAdmin = () => ME.role === 'admin';
-const USER_TABS = ['apps', 'settings'];
+const USER_TABS = ['apps', 'logs', 'settings'];
 function applyRole() {
   $$('#tabs .tab').forEach(b => { b.style.display = !isAdmin() && !USER_TABS.includes(b.dataset.tab) ? 'none' : ''; });
   $$('.admin-only').forEach(el => el.classList.toggle('hidden', !isAdmin()));
   ['#customBtn', '#updateAllApps'].forEach(s => $(s) && $(s).classList.toggle('hidden', !isAdmin()));
+  $('#chatFab').classList.toggle('hidden', !isAdmin());
 }
 
 // ===================================================================== users
@@ -1004,13 +1110,163 @@ function domainDialog(target) {
 }
 async function domDel(d) { if (!confirm(`Remove ${d}?`)) return; await guard(async () => { const r = await api('/api/domains/' + encodeURIComponent(d), { method: 'DELETE' }); toast(r.message); loadDomains(); }); }
 $('#domAdd').onclick = () => domainDialog(null);
+
+// ===================================================================== GPU eco mode
+let ecoCache = null;
+async function loadEco() {
+  const r = ecoCache = await api('/api/gpu/power');
+  $$('#ecoModes button').forEach(b => { b.classList.toggle('btn-p', b.dataset.mode === r.mode); b.classList.toggle('btn-g', b.dataset.mode !== r.mode); });
+  const ctl = r.gpus.filter(g => g.default);
+  $('#ecoTable').innerHTML = r.gpus.length ? `<table class="w-full text-sm"><thead><tr class="text-left text-slate-400 border-b border-ink-800"><th class="py-1">GPU</th><th>Drawing now</th><th>Limit</th><th>Default</th><th>Range</th>${r.mode === 'custom' ? '<th>Custom (W)</th>' : ''}</tr></thead><tbody>` +
+    r.gpus.map(g => `<tr class="border-b border-ink-800"><td class="py-1">${esc(g.name)}</td><td>${g.draw != null ? Math.round(g.draw) + ' W' : '-'}</td><td>${g.limit ? Math.round(g.limit) + ' W' : '<span class="text-slate-500">not adjustable</span>'}</td>
+      <td>${g.default ? Math.round(g.default) + ' W' : '-'}</td><td class="text-slate-400">${g.min != null && g.max ? Math.round(g.min) + '-' + Math.round(g.max) + ' W' : '-'}</td>
+      ${r.mode === 'custom' ? `<td>${g.default ? `<input type="number" class="inp !w-24 !py-0 ecoW" data-bus="${esc(g.bus)}" value="${Math.round(r.custom[g.bus] || g.limit || g.default)}" min="${g.min || 10}" max="${g.max || 1000}">` : ''}</td>` : ''}</tr>`).join('') + '</tbody></table>'
+    : '<p class="text-sm text-slate-500">No GPUs detected.</p>';
+  if (r.gpus.length && !ctl.length) $('#ecoTable').innerHTML += '<p class="text-xs text-slate-500 mt-2">These GPUs don\'t report adjustable power limits (needs the NVIDIA driver, or amdgpu with power1_cap).</p>';
+  $('#ecoPrice').value = r.price || ''; $('#ecoCur').value = r.currency || '$';
+  $('#ecoCost').innerHTML = `GPUs average <b>${r.avg_w} W</b> over the last hour ≈ <b>${r.kwh_month} kWh</b> a month${r.price ? ` ≈ <b>${esc(r.currency)}${r.cost_month}</b> a month` : ' (enter your price to see the cost)'}`;
+}
+$$('#ecoModes button').forEach(b => b.onclick = () => guard(async () => {
+  if (b.dataset.mode === 'custom' && ecoCache.mode !== 'custom') { ecoCache.mode = 'custom'; await post('/api/gpu/power', { mode: 'custom' }); return loadEco(); }
+  const custom = Object.fromEntries($$('.ecoW').map(i => [i.dataset.bus, +i.value]));
+  const r = await post('/api/gpu/power', { mode: b.dataset.mode, custom }); toast(r.applied.join(' · ') || 'Saved (no adjustable GPUs found)'); loadEco();
+}, b));
+$('#ecoSave').onclick = e => guard(async () => { const custom = Object.fromEntries($$('.ecoW').map(i => [i.dataset.bus, +i.value]));
+  await post('/api/gpu/power', { mode: ecoCache.mode, custom, price: +$('#ecoPrice').value || 0, currency: $('#ecoCur').value }); toast('Saved'); loadEco(); }, e.target);
+
+// ===================================================================== phone and alerts
+async function loadNotify() {
+  const n = await api('/api/notify');
+  $('#tgToken').value = n.telegram_token || ''; $('#dcHook').value = n.discord_webhook || ''; $('#ntfyUrl').value = n.ntfy_url || '';
+  $('#alTemp').value = n.alerts.gpu_temp; $('#alDisk').value = n.alerts.disk_pct; $('#alGpu').checked = n.alerts.gpu_change; $('#alApp').checked = n.alerts.app_down;
+  $('#tgBot').innerHTML = n.telegram_token ? (n.bot ? `Bot: <a class="text-sky-300 hover:underline" href="https://t.me/${esc(n.bot)}" target="_blank" rel="noopener">@${esc(n.bot)}</a>. Send it /start from your phone, then allow your chat below.` : 'Token saved. Send your bot /start from Telegram, then allow your chat below.') : '';
+  const allowed = n.telegram_chats, seen = Object.entries(n.telegram_seen || {}).filter(([id]) => !allowed.includes(+id));
+  $('#tgChats').innerHTML = allowed.map(id => `<div class="flex items-center gap-2"><span class="pill bg-emerald-900 text-emerald-200">✓ ${id}</span> ${esc(n.telegram_seen?.[id] || '')}<button class="text-red-400 text-xs" onclick="tgSet(${id},false)">remove</button></div>`).join('') +
+    seen.map(([id, name]) => `<div class="flex items-center gap-2"><span class="pill bg-amber-900 text-amber-200">${id}</span> ${esc(name)} <button class="btn btn-g !py-0 text-xs" onclick="tgSet(${id},true)">Allow</button></div>`).join('') ||
+    '<p class="text-slate-500">None yet. Message your bot and it shows up here.</p>';
+  window._tgChats = allowed;
+}
+async function tgSet(id, on) { const list = on ? [...window._tgChats, id] : window._tgChats.filter(x => x !== id); await guard(async () => { await post('/api/notify', { telegram_chats: list }); loadNotify(); }); }
+$('#ntSave').onclick = e => guard(async () => { await post('/api/notify', { telegram_token: $('#tgToken').value.trim(), discord_webhook: $('#dcHook').value.trim(), ntfy_url: $('#ntfyUrl').value.trim(),
+  alerts: { gpu_temp: +$('#alTemp').value, disk_pct: +$('#alDisk').value, gpu_change: $('#alGpu').checked, app_down: $('#alApp').checked } }); toast('Saved'); loadNotify(); }, e.target);
+$('#ntTest').onclick = e => guard(async () => { await post('/api/notify/test'); toast('Test sent'); }, e.target);
+
+// ===================================================================== assistant settings
+async function loadAssistantCfg() {
+  const a = await api('/api/assistant/config'); $('#asProv').value = a.provider || 'ollama'; $('#asModel').value = a.model || ''; $('#asBase').value = a.base_url || ''; $('#asKey').value = a.api_key || '';
+  $$('.asOpenai').forEach(el => el.classList.toggle('hidden', $('#asProv').value !== 'openai'));
+  $('#asActive').textContent = a.active_model ? 'Using: ' + a.active_model : 'No model found yet. Download one in AI Models > Ollama (for example qwen3:8b).';
+}
+$('#asProv').onchange = () => $$('.asOpenai').forEach(el => el.classList.toggle('hidden', $('#asProv').value !== 'openai'));
+$('#asSave').onclick = e => guard(async () => { await post('/api/assistant/config', { provider: $('#asProv').value, model: $('#asModel').value, base_url: $('#asBase').value, api_key: $('#asKey').value }); toast('Saved'); loadAssistantCfg(); }, e.target);
+
+// ===================================================================== bundles
+async function loadBundles() {
+  if (!isAdmin()) return;
+  let bs = []; try { bs = await api('/api/bundles'); } catch { return; }
+  const names = Object.fromEntries(appsCache.map(a => [a.id, a.name]));
+  $('#bundleGrid').innerHTML = bs.map(b => { const done = b.installed.length === b.apps.length; return `<div class="rounded-lg bg-ink-800 p-3 flex flex-col">
+    <div class="font-semibold">${esc(b.icon)} ${esc(b.name)}</div><p class="text-xs text-slate-400 mt-1 flex-1">${esc(b.description)}</p>
+    <div class="text-xs text-slate-500 mt-2">${b.apps.map(a => (b.installed.includes(a) ? '✓ ' : '') + esc(names[a] || a)).join(' · ')}</div>
+    <button class="btn ${done ? 'btn-g' : 'btn-p'} !py-1 mt-2" ${done ? 'disabled' : ''} onclick="bundleDialog(${jq(b)})">${done ? 'Installed' : '⬇ Install all'}</button></div>`; }).join('');
+}
+function bundleDialog(b) {
+  const apps = b.apps.map(id => appsCache.find(a => a.id === id)).filter(a => a && !a.installed);
+  const needs = apps.flatMap(a => (a.inputs || []).filter(i => i.required).map(i => ({ a, i })));
+  const anyGpu = apps.some(a => a.gpu);
+  openModal(`Install ${b.name}`, `<div class="space-y-3 text-sm"><p class="text-slate-400">${esc(b.description)}</p>
+    <div>Will install: ${apps.map(a => `<span class="pill bg-ink-700">${esc(a.icon || '')} ${esc(a.name)}</span>`).join(' ')}</div>
+    ${anyGpu ? `<label class="block">GPU for apps that use one<select id="bGpu" class="inp mt-1"><option value="auto">Auto</option><option value="nvidia">NVIDIA</option><option value="amd">AMD</option><option value="none">CPU only</option></select></label>` : ''}
+    ${needs.map(({ a, i }) => `<label class="block">${esc(a.name)}: ${esc(i.label || i.key)}<input class="inp mt-1 bIn" data-app="${esc(a.id)}" data-key="${esc(i.key)}" ${i.secret ? 'type="password"' : ''}></label>`).join('')}
+    ${b.notes ? `<p class="text-xs text-slate-400">${esc(b.notes)}</p>` : ''}
+    <div class="flex justify-end gap-2"><button class="btn btn-g" onclick="closeModal()">Cancel</button><button id="bGo" class="btn btn-p">Install ${apps.length} app(s)</button></div></div>`);
+  $('#bGo').onclick = e => guard(async () => { const inputs = {}; $$('.bIn').forEach(x => { (inputs[x.dataset.app] = inputs[x.dataset.app] || {})[x.dataset.key] = x.value; });
+    const { task } = await post(`/api/bundles/${b.id}/install`, { gpu: $('#bGpu') ? $('#bGpu').value : 'auto', inputs }); closeModal(); toggleDrawer(true); onTaskDone(task, loadApps); }, e.target);
+}
+$('#bundleToggle').onclick = () => { const h = $('#bundleGrid').classList.toggle('hidden'); $('#bundleToggle').textContent = h ? 'Show' : 'Hide'; try { localStorage.setItem('aip-bundles-hidden', h ? '1' : ''); } catch { } };
+try { if (localStorage.getItem('aip-bundles-hidden')) { $('#bundleGrid').classList.add('hidden'); $('#bundleToggle').textContent = 'Show'; } } catch { }
+
+// ===================================================================== live logs
+const logs = { es: null, lines: [], paused: false, src: '' };
+const LOG_ERR = /\b(error|err|fail(ed|ure)?|fatal|panic|exception|traceback|denied|refused|oom|killed|xid|critical|cannot|unable)\b/i;
+async function loadLogSources(pick) {
+  const ss = await api('/api/logs/sources'); const groups = {};
+  ss.forEach(s => (groups[s.group] = groups[s.group] || []).push(s));
+  $('#logSrc').innerHTML = Object.entries(groups).map(([g, items]) => `<optgroup label="${esc(g)}">${items.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')}</optgroup>`).join('') || '<option value="">No logs available</option>';
+  const want = pick || logs.src || (ss[0] && ss[0].id);
+  if (want && ss.some(s => s.id === want)) $('#logSrc').value = want;
+  if ($('#logSrc').value) startLog($('#logSrc').value);
+}
+function startLog(src) {
+  if (logs.es) logs.es.close(); logs.src = src; logs.lines = []; $('#logBox').innerHTML = '';
+  if (!src) return;
+  const es = logs.es = new EventSource('/api/logs/stream?source=' + encodeURIComponent(src) + '&tail=300');
+  $('#logState').textContent = 'connecting'; $('#logState').className = 'pill bg-ink-800';
+  es.onopen = () => { $('#logState').textContent = '● live'; $('#logState').className = 'pill bg-green-900 text-green-300'; };
+  es.onmessage = e => addLogLine(e.data);
+  es.addEventListener('end', () => { $('#logState').textContent = 'ended'; es.close(); });
+  es.onerror = () => { $('#logState').textContent = 'reconnecting'; $('#logState').className = 'pill bg-amber-900 text-amber-200'; };
+}
+function logLineHtml(l) { const err = LOG_ERR.test(l); return `<div class="${err ? 'text-red-300' : /\bwarn(ing)?\b/i.test(l) ? 'text-amber-200' : ''}">${esc(l)}</div>`; }
+function logVisible(l) { const f = $('#logFilter').value.toLowerCase(); return (!f || l.toLowerCase().includes(f)) && (!$('#logErrOnly').checked || LOG_ERR.test(l)); }
+function addLogLine(l) {
+  logs.lines.push(l); if (logs.lines.length > 5000) logs.lines.splice(0, 1000);
+  if (logs.paused || !logVisible(l)) return;
+  const box = $('#logBox'), atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  box.insertAdjacentHTML('beforeend', logLineHtml(l)); if (box.childElementCount > 3000) box.firstElementChild.remove();
+  if (atEnd) box.scrollTop = box.scrollHeight;
+}
+function redrawLogs() { $('#logBox').innerHTML = logs.lines.filter(logVisible).slice(-3000).map(logLineHtml).join(''); $('#logBox').scrollTop = 1e9; }
+$('#logSrc').onchange = () => startLog($('#logSrc').value);
+$('#logFilter').oninput = redrawLogs; $('#logErrOnly').onchange = redrawLogs;
+$('#logPause').onclick = () => { logs.paused = !logs.paused; $('#logPause').textContent = logs.paused ? '▶ Resume' : '⏸ Pause'; if (!logs.paused) redrawLogs(); };
+$('#logClear').onclick = () => { logs.lines = []; $('#logBox').innerHTML = ''; };
+$('#logSave').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([logs.lines.join('\n')], { type: 'text/plain' })); a.download = (logs.src || 'log').replace(/[^a-z0-9-]/gi, '_') + '.log'; a.click(); };
+$('#logAsk').onclick = () => {
+  const errs = logs.lines.filter(l => LOG_ERR.test(l)); const tail = logs.lines.slice(-120);
+  const text = [...new Set([...errs.slice(-40), ...tail])].join('\n').slice(-7000);
+  if (!text) return toast('No log lines yet', 'err');
+  openChat(); chatSend(`Please look at these logs from ${$('#logSrc').selectedOptions[0]?.textContent || logs.src} and tell me what's wrong and how to fix it:\n\n${text}`, true);
+};
+function openLiveLogs(id) { closeModal(); showTab('logs'); loadLogSources('app:' + id); }
+
+// ===================================================================== AI chat
+let chatHist = []; try { chatHist = JSON.parse(sessionStorage.getItem('aip-chat') || '[]'); } catch { }
+const CHAT_CHIPS = ['How is my server?', 'Install the Private ChatGPT bundle', 'Switch GPUs to eco', 'Make a short video about the ocean', 'Why did my last app fail?'];
+function md(s) { return esc(s).replace(/```([\s\S]*?)```/g, '<pre class="log text-xs whitespace-pre-wrap">$1</pre>').replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>'); }
+function renderChat() {
+  $('#chatMsgs').innerHTML = chatHist.length ? chatHist.map(m => m.role === 'user'
+    ? `<div class="flex justify-end"><div class="bg-accent-600 text-white rounded-2xl rounded-br-sm px-3 py-2 max-w-[85%] break-words">${m.short ? esc(m.short) : md(m.content)}</div></div>`
+    : `<div><div class="bg-ink-800 rounded-2xl rounded-bl-sm px-3 py-2 max-w-[92%] break-words">${md(m.content)}</div>${(m.actions || []).map(a => `<div class="mt-2 flex gap-2 items-center">${a.done ? `<span class="text-xs ${a.ok ? 'text-green-400' : 'text-red-400'}">${esc(a.done)}</span>` : `<button class="btn btn-p !py-1" onclick="chatConfirm(${jq(a.id)})">✅ ${esc(a.label)}</button><button class="btn btn-g !py-1" onclick="chatCancel(${jq(a.id)})">Cancel</button>`}</div>`).join('')}</div>`).join('')
+    : `<div class="text-slate-400">Hi! I can check the server, read logs, install apps and bundles, switch GPU eco mode, download models and make videos. I always ask before changing anything.</div>`;
+  $('#chatChips').innerHTML = chatHist.length ? '' : CHAT_CHIPS.map(c => `<button class="pill bg-ink-800 hover:bg-ink-700" onclick="chatSend(${jq(c)})">${esc(c)}</button>`).join('');
+  $('#chatMsgs').scrollTop = 1e9; try { sessionStorage.setItem('aip-chat', JSON.stringify(chatHist.slice(-30))); } catch { }
+}
+async function chatSend(text, isLog) {
+  text = (text || '').trim(); if (!text) return;
+  chatHist.push({ role: 'user', content: text, short: isLog ? '🔎 Check these logs (' + text.split('\n').length + ' lines)' : '' }); renderChat();
+  $('#chatMsgs').insertAdjacentHTML('beforeend', '<div id="chatWait" class="text-slate-400">Thinking...</div>'); $('#chatMsgs').scrollTop = 1e9;
+  try {
+    const r = await post('/api/assistant', { messages: chatHist.map(m => ({ role: m.role, content: m.content })) });
+    chatHist.push({ role: 'assistant', content: r.reply || '(no answer)', actions: r.actions }); $('#chatModel').textContent = r.model ? 'Model: ' + r.model : 'Simple commands (no AI model running)';
+  } catch (e) { chatHist.push({ role: 'assistant', content: '⚠️ ' + e.message }); }
+  renderChat();
+}
+function findAct(id) { for (const m of chatHist) for (const a of (m.actions || [])) if (a.id === id) return a; }
+async function chatConfirm(id) { const a = findAct(id); try { const r = await post('/api/assistant/confirm', { id }); a.done = r.message; a.ok = r.ok; if (r.task) { toggleDrawer(true); onTaskDone(r.task, () => { if (currentTab === 'apps') loadApps(); }); } } catch (e) { a.done = e.message; a.ok = false; } renderChat(); }
+function chatCancel(id) { const a = findAct(id); a.done = 'Cancelled'; a.ok = false; renderChat(); }
+function openChat() { $('#chatBox').classList.remove('hidden'); $('#chatFab').classList.add('hidden'); renderChat(); setTimeout(() => $('#chatIn').focus(), 50); }
+$('#chatFab').onclick = openChat;
+$('#chatClose').onclick = () => { $('#chatBox').classList.add('hidden'); $('#chatFab').classList.toggle('hidden', !isAdmin()); };
+$('#chatNew').onclick = () => { chatHist = []; renderChat(); };
+$('#chatForm').onsubmit = e => { e.preventDefault(); const v = $('#chatIn').value; $('#chatIn').value = ''; chatSend(v); };
 function appMenu(id) {
   const a = appsCache.find(x => x.id === id);
   openModal(a.name, `<div class="space-y-3">
     <div class="text-sm">${a.containers.map(c => `<div class="flex justify-between border-b border-ink-800 py-1"><span>${esc(c.name)}</span><span class="text-slate-400">${esc(c.status)}</span></div>`).join('')}</div>
     <div class="flex flex-wrap gap-2">
       <button class="btn btn-g" onclick="appAction('${id}','restart');closeModal()">↻ Restart</button>
-      <button class="btn btn-g" onclick="appLogs('${id}')">📜 Logs</button>
+      <button class="btn btn-g" onclick="openLiveLogs('${id}')">📜 Live logs</button>
       <button class="btn btn-g" onclick="appSecrets('${id}')">🔑 Secrets</button>
       ${isAdmin() ? `<button class="btn btn-g" onclick="openAppFiles('${id}')">📁 Files</button>
       <button class="btn btn-g" onclick="domainDialog('${id}')">🌐 Domain + HTTPS</button>
@@ -1114,7 +1370,7 @@ async function loadSettings() {
   const i = isAdmin() ? await api('/api/system/info').catch(() => null) : null;
   if (i) { $('#sysInfo').innerHTML = `Panel v${esc(i.version)} · ${esc(i.os)}<br>${esc(i.ollama || 'Ollama not found')} · ${esc(i.docker || 'Docker not found')}`; $('#updUrl').value = i.update_url || ''; }
   const r = await api('/api/apps').catch(() => ({ apps: [] })); appsCache = r.apps;
-  if (isAdmin()) { loadUsers(); loadSources(); loadDomains(); }
+  if (isAdmin()) { loadUsers(); loadSources(); loadDomains(); loadNotify(); loadAssistantCfg(); }
   $('#secApp').innerHTML = r.apps.filter(a => a.installed).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('') || '<option value="">No apps installed</option>';
 }
 $('#secShow').onclick = async () => { const id = $('#secApp').value; if (!id) return; const s = await api(`/api/apps/${id}/secrets`); $('#secOut').innerHTML = Object.entries(s).map(([k, v]) => `<div><span class="text-slate-400">${esc(k)}</span> = <span class="select-all">${esc(v)}</span></div>`).join(''); };

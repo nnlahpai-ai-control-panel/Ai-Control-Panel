@@ -39,6 +39,21 @@ Open WebUI, ComfyUI, InvokeAI, n8n, Immich, Jellyfin, Nextcloud, WordPress, Home
 ### 🎬 A creative studio in your browser
 Make **AI images** (ComfyUI, Fooocus, InvokeAI), **AI music and songs** (ACE-Step), **auto-generated short videos** (MoneyPrinterTurbo), subtitles, voice-overs and translations. Then edit them in **Kdenlive, Blender, GIMP or Krita**, running in a browser tab. Everything runs on your own GPUs, and the songs and images you make stay yours.
 
+### 🤖 An AI assistant that runs your server
+Type "install Dozzle", "make a 30 second video about the ocean", "set GPUs to eco" or "why did Jellyfin crash?" in the chat box. Your **own local model** picks the right action, and **nothing changes until you press the button** to confirm.
+
+### 📜 Live logs, and a local AI that explains the fix
+Watch any app, the AI engines, the proxy or the system journal live, filter it, or show only errors. Press **🤖 Ask local AI to fix** and your own model reads the errors and tells you the cause and the fix, with no data leaving your server.
+
+### 🎁 1-click pre-wired bundles
+Install a whole stack in one click, already connected together. **Private ChatGPT** gives you Open WebUI with SearXNG web search and Kokoro voice, all wired up. There are also bundles for an AI video studio, a music studio, home media, home office, AI automation and server care.
+
+### 🌱 GPU eco mode
+Choose Max, Balanced, Eco or your own watt limit per card. The panel shows live watts, kWh per day and the cost per month in your currency, and keeps your limits after a reboot.
+
+### 📱 Phone friendly, with Telegram, Discord and ntfy alerts
+The panel works on a phone and can be added to the home screen like an app. Get alerts when a GPU runs hot, a disk fills up, an app crashes or a GPU disappears. Control the server from **Telegram**: `/status`, `/apps`, `/restart_app jellyfin`, or just chat with your AI assistant, with a confirm button.
+
 ### 📁 A file manager for the whole server
 Browse every folder on the server and every app's data. Edit config files, upload by drag and drop, download whole folders as zip, preview photos, videos and PDFs, and fix permissions. There's no FTP or SSH to set up.
 
@@ -63,6 +78,10 @@ You get a full shell with no SSH client. Update one app, every app, the AI engin
 | **Mixed-GPU llama.cpp**: NVIDIA + AMD + Intel in one model | **App Store**: 52 apps with GPU passthrough |
 | ![GPU hot plug](docs/screenshots/gpu-hotplug.png) | ![Files](docs/screenshots/files.png) |
 | **Hot plug and auto rebalance** | **File manager** for the OS and every app |
+| ![AI assistant](docs/screenshots/assistant.png) | ![Live logs](docs/screenshots/logs.png) |
+| **AI assistant**: asks before it acts | **Live logs** with "Ask local AI to fix" |
+| ![Bundles](docs/screenshots/bundles.png) | ![Eco mode](docs/screenshots/eco.png) |
+| **1-click bundles**, pre-wired | **GPU eco mode** with kWh and cost |
 | ![GPU pools](docs/screenshots/gpu-pools.png) | ![Terminal](docs/screenshots/terminal.png) |
 | **GPU pools**: "AI" cards vs "Media" cards | **Browser terminal**: full root shell |
 
@@ -81,6 +100,11 @@ You get a full shell with no SSH client. Update one app, every app, the AI engin
 | Domains + automatic HTTPS in one click | ✅ | ⚠️ proxy config by hand | ⚠️ some |
 | Users who can only control their own apps | ✅ | ❌ | ⚠️ some |
 | Add your own app store catalogs | ✅ | ❌ | ⚠️ some |
+| Local AI chat that installs and controls apps | ✅ asks first | ❌ | ❌ |
+| Live logs with AI explanation | ✅ local model | ⚠️ read it yourself | ⚠️ logs only |
+| Pre-wired app bundles | ✅ 7 bundles | ❌ | ❌ |
+| GPU power limits and energy cost | ✅ | ⚠️ nvidia-smi by hand | ❌ |
+| Phone alerts and Telegram control | ✅ | ❌ | ⚠️ some |
 | Runs on your existing Ubuntu, no new OS | ✅ | ✅ | ⚠️ some replace the OS |
 
 **Feedback wanted!** If you try it, please [share a hardware report](../../issues/new?template=hardware_report.yml), [report a bug](../../issues/new?template=bug_report.yml), [request an app](../../issues/new?template=app_request.yml) or star ⭐ the repo. Reports from mixed NVIDIA + AMD rigs and older cards (GTX 10xx, Tesla) help most. See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -241,6 +265,51 @@ Notes:
 * Apps with a bad id or an invalid compose file are skipped and counted. If an app id is already in the built-in catalog, the built-in app wins.
 * **Refresh all**, and **Settings > Refresh app catalog**, re-download every source.
 * Only add sources you trust: their apps run as Docker containers on your server.
+
+## AI assistant (💬 button, bottom right, admins only)
+
+* Pick the model in **Settings > AI assistant**. "Auto" uses Ollama and picks a model that can use tools. **qwen3:8b**, llama3.1:8b or qwen2.5:7b work well. If llama.cpp serves the model, start it with `--jinja` so tool calls work.
+* It can show status, list and install apps or bundles, start, stop, restart or update apps, read logs, pull models, set GPU power, add a domain and **create a video** (through MoneyPrinterTurbo, saved to the shared `videos` folder).
+* Anything that changes the server shows a **Confirm** button first. Nothing runs until you press it, and the button expires after an hour.
+* No model yet? Short commands such as `install dozzle`, `restart jellyfin` or `status` still work.
+
+## Live logs (Logs tab)
+
+* Sources: each installed app, Ollama, llama.cpp, the panel, the HTTPS proxy, system errors and the kernel (for GPU and driver errors).
+* Filter by text, show **errors only**, pause, clear or save to a file. Users see logs only for their own apps.
+* **🤖 Ask local AI to fix** sends the last lines to your own model, which explains the cause and the commands to fix it. With no model, it shows the matching error lines.
+
+## 1-click bundles (App Store, top row)
+
+| Bundle | Apps | Wired together |
+|---|---|---|
+| 💬 Private ChatGPT | Open WebUI, SearXNG, Kokoro TTS | Web search and voice already on in Open WebUI |
+| 🎬 AI video studio | ComfyUI, Kokoro, Whisper, MoneyPrinterTurbo, Kdenlive | MoneyPrinter uses your Ollama model |
+| 🎵 Music studio | ACE-Step, Spleeter Web, Karaoke Eternal, Navidrome | Shared media folder |
+| 🏠 Home media | Jellyfin, Immich, Navidrome, File Browser | GPU transcoding and photo AI |
+| 🗂️ Home office | Nextcloud, Paperless-ngx, Stirling PDF, Vaultwarden | |
+| ⚙️ AI automation | SearXNG, Qdrant, n8n, Flowise | Search and vector database ready |
+| 🛠️ Server care | Uptime Kuma, Dozzle, Netdata, Watchtower | Nightly updates |
+
+Apps you already have are skipped, and their passwords are kept.
+
+## GPU eco mode (GPU & System > Power)
+
+| Mode | Power limit |
+|---|---|
+| Max | 100% of the card's default |
+| Balanced | 80% (often only a little slower for AI) |
+| Eco | 60% |
+| Custom | Your own watts per card |
+
+NVIDIA uses `nvidia-smi -pl`. AMD uses the `power1_cap` setting of the amdgpu driver. Intel cards and some laptop GPUs don't allow a limit and show "not adjustable". Set your electricity price to see the cost per month.
+
+## Phone and alerts (Settings > Phone and alerts)
+
+* **On the phone**: open the panel in the browser and choose **Add to Home Screen**.
+* **Telegram**: create a bot with **@BotFather**, paste the token, then send `/start` to your bot. Press **Allow** next to your chat in the panel. Commands: `/status`, `/apps`, `/start_app <app>`, `/stop_app <app>`, `/restart_app <app>`, `/eco eco|balanced|max`. Anything else goes to the AI assistant. Every change asks you to confirm with a button.
+* **Discord**: paste a channel webhook URL. **ntfy**: paste a topic URL such as `https://ntfy.sh/my-server-123`.
+* Alerts: GPU temperature, disk full, an app that crashed, and a GPU added or removed. The same alert won't repeat for at least an hour.
 
 ## Getting models and apps in
 

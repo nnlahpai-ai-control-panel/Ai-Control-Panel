@@ -39,11 +39,11 @@ import httpx
 import psutil
 import yaml
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"
@@ -182,6 +182,7 @@ USER_ROUTES = [
     ("POST", re.compile(r"^/api/(logout|change-password)$"), None),
     ("POST", re.compile(r"^/api/apps/([a-z0-9\-]+)/(start|stop|restart|update)$"), 1),
     ("GET", re.compile(r"^/api/apps/([a-z0-9\-]+)/(logs|secrets)$"), 1),
+    ("GET", re.compile(r"^/api/logs/(sources|stream)$"), None),  # stream checks the app itself
 ]
 
 
@@ -272,9 +273,16 @@ from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(_app):
-    task = asyncio.create_task(sampler_loop())  # system-monitor sampler (defined below)
+    tasks = [asyncio.create_task(sampler_loop()), asyncio.create_task(telegram_loop())]  # defined below
+    try:
+        msgs = await asyncio.to_thread(apply_gpu_power, load_config())  # power limits reset at reboot
+        if msgs:
+            print("GPU power:", "; ".join(msgs), file=sys.stderr)
+    except Exception as e:
+        print("GPU power:", e, file=sys.stderr)
     yield
-    task.cancel()
+    for task in tasks:
+        task.cancel()
 
 
 app = FastAPI(title="AI Server Control Panel", version=VERSION, docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -284,7 +292,7 @@ async def httpx_error(request: Request, exc: httpx.HTTPError):
     return JSONResponse({"detail": f"Network error: {exc}"}, status_code=502)
 
 
-PUBLIC_PATHS = {"/", "/index.html", "/api/login", "/api/health", "/favicon.ico"}
+PUBLIC_PATHS = {"/", "/index.html", "/api/login", "/api/health", "/favicon.ico", "/manifest.webmanifest", "/icon.svg"}
 
 
 @app.middleware("http")
@@ -675,6 +683,7 @@ def _sample() -> None:
         "gpu": [g.get("util") for g in gpus],
         "vram": [round(100 * (g["vram_used_mb"] or 0) / g["vram_total_mb"], 1) if g.get("vram_total_mb") else None for g in gpus],
         "gtemp": [g.get("temp") for g in gpus],
+        "gpw": round(sum((g.get("power_w") or 0) for g in gpus), 1),
     })
     if len(HISTORY) > HISTORY_POINTS:
         del HISTORY[:len(HISTORY) - HISTORY_POINTS]
@@ -692,6 +701,9 @@ async def sampler_loop() -> None:
             ev, GPU_WATCH["todo"] = GPU_WATCH["todo"], None
             if ev:
                 asyncio.create_task(gpu_rebalance(ev))
+            _alert_state["tick"] = _alert_state.get("tick", 0) + 1
+            if _alert_state["tick"] % 12 == 0:
+                asyncio.create_task(check_alerts())
         except Exception as e:  # never let monitoring kill the panel
             print("sampler:", e, file=sys.stderr)
         await asyncio.sleep(5)
@@ -1687,6 +1699,7 @@ def prepare_data_dirs(a: dict) -> None:
 
 class InstallBody(BaseModel):
     inputs: dict[str, str] = {}
+    env: dict[str, str] = {}  # extra .env values (bundles use this to wire apps together)
     port: Optional[int] = None
     gpu: str = "auto"
     pool: str = ""
@@ -1721,6 +1734,13 @@ def render_app(a: dict, body: InstallBody) -> tuple[str, str]:
         if "\n" in v:
             raise HTTPException(400, f"{k} must be a single line")
         env[k] = v
+    for k, v in body.env.items():
+        if not re.match(r"^[A-Z_][A-Z0-9_]*$", k) or "\n" in str(v):
+            raise HTTPException(400, f"Bad env value {k}")
+        env[k] = str(v)
+    for k, v in old.items():  # keep values set earlier (bundle wiring, hand edits)
+        if k not in env and k not in ("GPU_MODE", "GPU_POOL"):
+            env[k] = v
     compose_text = a.get("compose", "")
     if not compose_text:
         raise HTTPException(400, "App has no compose definition")
@@ -1799,6 +1819,14 @@ async def install_app(app_id: str, body: InstallBody):
 
     async def run():
         # seed config files the app expects to exist (downloaded once, never overwritten)
+        seeded = set()
+        base = (DATA_DIR / app_id).resolve()
+        for rel, content in (a.get("write_files") or {}).items():
+            dest = (DATA_DIR / app_id / rel).resolve()
+            if str(dest).startswith(str(base) + "/") and not dest.exists():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
+                task_log(t, f"Created {rel}")
         for rel, url in (a.get("seed_files") or {}).items():
             dest = (DATA_DIR / app_id / rel).resolve()
             if not str(dest).startswith(str((DATA_DIR / app_id).resolve()) + "/") or dest.exists():
@@ -1809,9 +1837,26 @@ async def install_app(app_id: str, body: InstallBody):
                     r.raise_for_status()
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(r.content)
+                seeded.add(rel)
                 task_log(t, f"Created {rel}")
             except Exception as e:
                 task_log(t, f"Could not download {rel}: {e}")
+        for rel, kv in (a.get("patch_files") or {}).items():
+            if rel not in seeded:
+                continue
+            dest = DATA_DIR / app_id / rel
+            text = dest.read_text()
+            for k, v in kv.items():
+                if v == "{{ollama_model}}":
+                    try:
+                        tags = await ollama_get("/api/tags", timeout=5)
+                        names = [m["name"] for m in tags.get("models", []) if "embed" not in m["name"]]
+                        v = next((x for x in names if TOOL_MODEL_HINT.search(x)), names[0] if names else "qwen3:8b")
+                    except Exception:
+                        v = "qwen3:8b"
+                text = re.sub(rf'^(\s*){re.escape(k)}\s*=.*$', lambda m: f'{m.group(1)}{k} = {json.dumps(v)}', text, count=1, flags=re.M)
+            dest.write_text(text)
+            task_log(t, f"Configured {rel}: " + ", ".join(kv))
         task_log(t, "Pulling images (this can take a while)...")
         rc = await run_cmd(t, compose_cmd(app_id) + ["pull"])
         if rc != 0:
@@ -1852,12 +1897,16 @@ async def app_action(app_id: str, action: str, purge: bool = False):
             task_done(t, rc == 0, "Uninstalled" if rc == 0 else "Uninstall failed")
         asyncio.create_task(run_un())
         return {"task": t["id"]}
+    if action in ("stop", "uninstall"):
+        _expected_stops.add(app_id)
     if action not in ACTIONS:
         raise HTTPException(404, "Unknown action")
     t = new_task("app", f"{action.capitalize()} {app_id}")
 
     async def run():
         rc = 0
+        if action == "update":
+            refresh_compose(app_id, t)
         for step in ACTIONS[action]:
             rc = await run_cmd(t, compose_cmd(app_id) + step)
             if rc != 0:
@@ -1867,6 +1916,20 @@ async def app_action(app_id: str, action: str, purge: bool = False):
         task_done(t, rc == 0, "Done" if rc == 0 else "Failed - see log")
     asyncio.create_task(run())
     return {"task": t["id"]}
+
+
+def refresh_compose(aid: str, t: dict) -> None:
+    """Re-render an installed app from the latest catalog (keeps .env secrets, port, GPU and pool)."""
+    try:
+        a = next((x for x in load_catalog() if x["id"] == aid), None)
+        if a:
+            old = parse_env((APPS_DIR / aid / ".env").read_text())
+            c, e = render_app(a, InstallBody(gpu=old.get("GPU_MODE", "auto"), pool=old.get("GPU_POOL", "")))
+            (APPS_DIR / aid / "docker-compose.yml").write_text(c)
+            (APPS_DIR / aid / ".env").write_text(e)
+            (APPS_DIR / aid / "app.json").write_text(json.dumps(a, indent=2))
+    except Exception as ex:
+        task_log(t, f"(kept old compose: {ex})")
 
 
 @app.post("/api/apps-update-all")
@@ -1879,17 +1942,7 @@ async def apps_update_all():
         failed = []
         for i, aid in enumerate(installed):
             task_log(t, f"== [{i + 1}/{len(installed)}] {aid} ==")
-            # refresh compose from the latest catalog (keeps .env secrets and port)
-            try:
-                a = next((x for x in load_catalog() if x["id"] == aid), None)
-                if a:
-                    old = parse_env((APPS_DIR / aid / ".env").read_text())
-                    c, e = render_app(a, InstallBody(gpu=old.get("GPU_MODE", "auto"), pool=old.get("GPU_POOL", "")))
-                    (APPS_DIR / aid / "docker-compose.yml").write_text(c)
-                    (APPS_DIR / aid / ".env").write_text(e)
-                    (APPS_DIR / aid / "app.json").write_text(json.dumps(a, indent=2))
-            except Exception as ex:
-                task_log(t, f"(kept old compose: {ex})")
+            refresh_compose(aid, t)
             rc = await run_cmd(t, compose_cmd(aid) + ["pull"])
             if rc == 0:
                 rc = await run_cmd(t, compose_cmd(aid) + ["up", "-d", "--remove-orphans"])
@@ -2553,6 +2606,9 @@ async def gpu_rebalance(ev: dict, manual: bool = False) -> None:
             task_log(t, msg)
         if not ev["actions"]:
             ev["actions"].append("No model server was running, so nothing needed a restart")
+        if notify_cfg(load_config())["alerts"].get("gpu_change") and not manual:
+            what = ", ".join(["+" + x for x in ev["added"]] + ["-" + x for x in ev["removed"]])
+            asyncio.create_task(notify(f"🔌 GPU change: {what}. Now {ev['gpus']} GPU(s), {ev['vram_gb']}GB VRAM. " + "; ".join(ev["actions"])))
         task_done(t, True, "; ".join(ev["actions"]))
     except Exception as e:
         ev["actions"].append(f"Rebalance failed: {e}")
@@ -2827,6 +2883,936 @@ async def file_download(path: str, inline: bool = False):
         return FileResponse(archive, filename=(p.name or "root") + ".zip",
                             background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True))
     raise HTTPException(404, "Not found")
+
+
+# --------------------------------------------------------------------------------------
+# GPU eco mode: power limits per GPU (NVIDIA via nvidia-smi, AMD via hwmon power1_cap), re-applied at boot
+# --------------------------------------------------------------------------------------
+ECO_MODES = {"max": 1.0, "balanced": 0.8, "eco": 0.6}
+
+
+def _amd_hwmon(g: dict) -> Optional[str]:
+    card = g.get("card")
+    if not card:
+        return None
+    for h in glob.glob(f"/sys/class/drm/{os.path.basename(card)}/device/hwmon/hwmon*"):
+        if os.path.exists(h + "/power1_cap"):
+            return h
+    return None
+
+
+def gpu_power_info(g: dict) -> dict:
+    """Current / default / min / max power limit in watts (None when the driver doesn't expose it)."""
+    if g["vendor"] == "NVIDIA":
+        rc, out = run_quick(["nvidia-smi", "-i", str(g.get("nv_index", 0)), "--query-gpu=power.limit,power.default_limit,power.min_limit,power.max_limit",
+                             "--format=csv,noheader,nounits"], timeout=8)
+        try:
+            cur, dflt, mn, mx = [float(x) for x in out.strip().split(",")]
+            return {"limit": cur, "default": dflt, "min": mn, "max": mx}
+        except Exception:
+            return {}
+    h = _amd_hwmon(g)
+    if not h:
+        return {}
+
+    def w(name):
+        v = _read(f"{h}/{name}")
+        return round(int(v) / 1_000_000) if v and v.isdigit() else None
+    return {"limit": w("power1_cap"), "default": w("power1_cap_default") or w("power1_cap_max"), "min": w("power1_cap_min") or 0, "max": w("power1_cap_max")}
+
+
+def set_gpu_power(g: dict, watts: float) -> str:
+    if g["vendor"] == "NVIDIA":
+        run_quick(["nvidia-smi", "-i", str(g.get("nv_index", 0)), "-pm", "1"], timeout=10)
+        rc, out = run_quick(["nvidia-smi", "-i", str(g.get("nv_index", 0)), "-pl", str(int(watts))], timeout=15)
+        return "" if rc == 0 else out.strip()[-200:]
+    h = _amd_hwmon(g)
+    if not h:
+        return "no power control in sysfs"
+    try:
+        Path(h + "/power1_cap").write_text(str(int(watts * 1_000_000)))
+        return ""
+    except Exception as e:
+        return str(e)
+
+
+def apply_gpu_power(cfg: dict) -> list[str]:
+    p = cfg.get("gpu_power", {})
+    mode, custom = p.get("mode", "max"), p.get("custom", {})
+    msgs = []
+    for g in all_gpus():
+        info = gpu_power_info(g)
+        if not info.get("default"):
+            continue
+        if mode == "custom" and g["bus"] in custom:
+            target = float(custom[g["bus"]])
+        else:
+            target = info["default"] * ECO_MODES.get(mode, 1.0)
+        target = max(info.get("min") or 0, min(info.get("max") or target, target))
+        if info.get("limit") and abs(info["limit"] - target) < 1:
+            msgs.append(f"{g['name']}: {round(target)} W")
+            continue
+        err = set_gpu_power(g, target)
+        msgs.append(f"{g['name']}: {round(target)} W" + (f" (failed: {err})" if err else ""))
+    return msgs
+
+
+@app.get("/api/gpu/power")
+async def gpu_power_get():
+    cfg = load_config()
+    gpus = await asyncio.to_thread(all_gpus)
+    out = []
+    for g in gpus:
+        info = await asyncio.to_thread(gpu_power_info, g)
+        out.append({"bus": g["bus"], "name": g["name"], "vendor": g["vendor"], "draw": g.get("power_w"), **info})
+    hist = [h.get("gpw") for h in HISTORY if h.get("gpw") is not None]
+    avg = sum(hist) / len(hist) if hist else sum((g.get("power_w") or 0) for g in gpus)
+    p = cfg.get("gpu_power", {})
+    price = float(p.get("price", 0) or 0)
+    kwh_month = avg * 24 * 30 / 1000
+    return {"mode": p.get("mode", "max"), "custom": p.get("custom", {}), "price": price, "currency": p.get("currency", "$"),
+            "gpus": out, "avg_w": round(avg, 1), "kwh_month": round(kwh_month, 1), "cost_month": round(kwh_month * price, 2)}
+
+
+class PowerBody(BaseModel):
+    mode: str = "max"
+    custom: dict[str, float] = {}
+    price: Optional[float] = None
+    currency: Optional[str] = None
+
+
+@app.post("/api/gpu/power")
+async def gpu_power_set(body: PowerBody):
+    if body.mode not in (*ECO_MODES, "custom"):
+        raise HTTPException(400, "mode must be max, balanced, eco or custom")
+    cfg = load_config()
+    p = cfg.setdefault("gpu_power", {})
+    p["mode"] = body.mode
+    if body.custom:
+        p["custom"] = {k: float(v) for k, v in body.custom.items() if re.match(r"^[0-9a-f:.]+$", k) and 10 <= float(v) <= 1000}
+    if body.price is not None:
+        p["price"] = max(0.0, float(body.price))
+    if body.currency is not None:
+        p["currency"] = body.currency[:4]
+    save_config(cfg)
+    msgs = await asyncio.to_thread(apply_gpu_power, cfg)
+    return {"ok": True, "applied": msgs}
+
+
+# --------------------------------------------------------------------------------------
+# Notifications (Telegram, Discord, ntfy) and alerts
+# --------------------------------------------------------------------------------------
+def notify_cfg(cfg: dict) -> dict:
+    n = cfg.setdefault("notify", {})
+    n.setdefault("telegram_token", "")
+    n.setdefault("telegram_chats", [])
+    n.setdefault("telegram_seen", {})
+    n.setdefault("discord_webhook", "")
+    n.setdefault("ntfy_url", "")
+    a = n.setdefault("alerts", {})
+    for k, v in {"gpu_temp": 85, "disk_pct": 90, "gpu_change": True, "app_down": True}.items():
+        a.setdefault(k, v)
+    return n
+
+
+async def tg_api(token: str, method: str, _timeout: float = 15, **params) -> dict:
+    async with httpx.AsyncClient(timeout=_timeout) as c:
+        r = await c.post(f"https://api.telegram.org/bot{token}/{method}", json=params)
+    return r.json()
+
+
+async def notify(text: str) -> None:
+    cfg = load_config()
+    n = notify_cfg(cfg)
+    host = socket.gethostname()
+    msg = f"🧠 {host}: {text}"
+    try:
+        if n["telegram_token"]:
+            for chat in n["telegram_chats"]:
+                await tg_api(n["telegram_token"], "sendMessage", chat_id=chat, text=msg[:4000])
+        async with httpx.AsyncClient(timeout=10) as c:
+            if n["discord_webhook"].startswith("https://"):
+                await c.post(n["discord_webhook"], json={"content": msg[:1900]})
+            if n["ntfy_url"].startswith(("https://", "http://")):
+                await c.post(n["ntfy_url"], content=msg.encode(), headers={"Title": f"AI Panel ({host})"})
+    except Exception as e:
+        print("notify:", e, file=sys.stderr)
+
+
+_alert_state: dict = {"sent": {}, "apps": None}
+
+
+def _cooldown(key: str, seconds: int) -> bool:
+    now = time.time()
+    if now - _alert_state["sent"].get(key, 0) < seconds:
+        return False
+    _alert_state["sent"][key] = now
+    return True
+
+
+async def check_alerts() -> None:
+    cfg = load_config()
+    n = notify_cfg(cfg)
+    if not (n["telegram_token"] and n["telegram_chats"]) and not n["discord_webhook"] and not n["ntfy_url"]:
+        return
+    a = n["alerts"]
+    msgs = []
+    for g in LIVE.get("gpus", []):
+        if a.get("gpu_temp") and (g.get("temp") or 0) >= a["gpu_temp"] and _cooldown("temp" + g["bus"], 3600):
+            msgs.append(f"🔥 {g['name']} is at {g['temp']:.0f}°C")
+    if a.get("disk_pct"):
+        for part in psutil.disk_partitions(all=False):
+            if part.fstype in ("squashfs", "overlay", "tmpfs") or part.mountpoint.startswith(("/snap", "/boot")):
+                continue
+            try:
+                u = psutil.disk_usage(part.mountpoint)
+            except OSError:
+                continue
+            if u.total >= 1 << 30 and u.percent >= a["disk_pct"] and _cooldown("disk" + part.mountpoint, 6 * 3600):
+                msgs.append(f"💽 {part.mountpoint} is {u.percent:.0f}% full ({u.free / 2**30:.1f}GB free)")
+    if a.get("app_down") and docker_ok():
+        states = await asyncio.to_thread(app_states)
+        now_ok = {k: v["running"] == v["total"] and v["total"] > 0 for k, v in states.items()}
+        prev = _alert_state["apps"]
+        if prev is not None:
+            for k, was in prev.items():
+                if was and not now_ok.get(k, False) and (APPS_DIR / k / "docker-compose.yml").exists() and k not in _expected_stops:
+                    msgs.append(f"⚠️ App {k} stopped or crashed")
+        _expected_stops.clear()
+        _alert_state["apps"] = now_ok
+    for m in msgs:
+        await notify(m)
+
+
+_expected_stops: set[str] = set()
+
+
+class NotifyBody(BaseModel):
+    telegram_token: Optional[str] = None
+    telegram_chats: Optional[list[int]] = None
+    discord_webhook: Optional[str] = None
+    ntfy_url: Optional[str] = None
+    alerts: Optional[dict] = None
+
+
+@app.get("/api/notify")
+async def notify_get():
+    n = dict(notify_cfg(load_config()))
+    n["telegram_token"] = ("set:" + n["telegram_token"][-4:]) if n["telegram_token"] else ""
+    if n["telegram_token"]:
+        n["bot"] = TG_STATE.get("bot", "")
+    return n
+
+
+@app.post("/api/notify")
+async def notify_set(body: NotifyBody):
+    cfg = load_config()
+    n = notify_cfg(cfg)
+    if body.telegram_token is not None and not body.telegram_token.startswith("set:"):
+        tok = body.telegram_token.strip()
+        if tok and not re.match(r"^\d+:[A-Za-z0-9_\-]{30,}$", tok):
+            raise HTTPException(400, "That doesn't look like a Telegram bot token (from @BotFather)")
+        if tok:
+            r = await tg_api(tok, "getMe")
+            if not r.get("ok"):
+                raise HTTPException(400, "Telegram rejected the token: " + str(r.get("description")))
+            TG_STATE["bot"] = r["result"].get("username", "")
+        n["telegram_token"] = tok
+    if body.telegram_chats is not None:
+        n["telegram_chats"] = [int(c) for c in body.telegram_chats]
+    if body.discord_webhook is not None:
+        if body.discord_webhook and not body.discord_webhook.startswith("https://"):
+            raise HTTPException(400, "Discord webhook must start with https://")
+        n["discord_webhook"] = body.discord_webhook.strip()
+    if body.ntfy_url is not None:
+        if body.ntfy_url and not body.ntfy_url.startswith(("https://", "http://")):
+            raise HTTPException(400, "ntfy URL must start with http(s)://")
+        n["ntfy_url"] = body.ntfy_url.strip()
+    if body.alerts is not None:
+        for k in ("gpu_temp", "disk_pct"):
+            if k in body.alerts:
+                n["alerts"][k] = int(body.alerts[k] or 0)
+        for k in ("gpu_change", "app_down"):
+            if k in body.alerts:
+                n["alerts"][k] = bool(body.alerts[k])
+    save_config(cfg)
+    return {"ok": True}
+
+
+@app.post("/api/notify/test")
+async def notify_test():
+    await notify("✅ Test message from AI Server Control Panel")
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------------------
+# Telegram bot: status, app control, eco mode and the AI assistant from your phone
+# --------------------------------------------------------------------------------------
+TG_STATE: dict = {"bot": "", "hist": {}, "running": False}
+TG_HELP = ("Commands:\n/status - CPU, RAM, GPUs, disks\n/apps - installed apps\n/start_app ID, /stop_app ID, /restart_app ID\n"
+           "/eco max|balanced|eco - GPU power\n/help\nOr just write what you want, for example \"install jellyfin\" or "
+           "\"make a video about the ocean\". I ask before changing anything.")
+
+
+def status_text() -> str:
+    vm = psutil.virtual_memory()
+    lines = [f"CPU {psutil.cpu_percent(interval=0.3):.0f}% · RAM {vm.percent:.0f}% ({(vm.total - vm.available) / 2**30:.1f}/{vm.total / 2**30:.0f}GB)"]
+    for g in LIVE.get("gpus") or all_gpus():
+        vt, vu = g.get("vram_total_mb") or 0, g.get("vram_used_mb") or 0
+        lines.append(f"🎮 {g['name']}: {g.get('util') or 0:.0f}% · {vu / 1024:.1f}/{vt / 1024:.0f}GB · "
+                     f"{(g.get('temp') or 0):.0f}°C · {(g.get('power_w') or 0):.0f}W")
+    for part in psutil.disk_partitions(all=False):
+        if part.fstype in ("squashfs", "overlay", "tmpfs") or part.mountpoint.startswith(("/snap", "/boot")):
+            continue
+        try:
+            u = psutil.disk_usage(part.mountpoint)
+            if u.total < 1 << 30:
+                continue
+            lines.append(f"💽 {part.mountpoint}: {u.percent:.0f}% used, {u.free / 2**30:.0f}GB free")
+        except OSError:
+            pass
+    up = int(time.time() - psutil.boot_time())
+    lines.append(f"⏱ up {up // 86400}d {up % 86400 // 3600}h")
+    return "\n".join(lines)
+
+
+def apps_text() -> str:
+    states = app_states()
+    out = []
+    for d in sorted(APPS_DIR.iterdir()) if APPS_DIR.exists() else []:
+        if (d / "docker-compose.yml").exists():
+            st = states.get(d.name)
+            ok = st and st["total"] and st["running"] == st["total"]
+            out.append(f"{'🟢' if ok else '⚪'} {d.name}")
+    return "\n".join(out) or "No apps installed yet."
+
+
+def _action_keyboard(actions: list[dict]) -> Optional[dict]:
+    if not actions:
+        return None
+    return {"inline_keyboard": [[{"text": "✅ " + a["label"][:50], "callback_data": "ok:" + a["id"]},
+                                 {"text": "✖", "callback_data": "no:" + a["id"]}] for a in actions]}
+
+
+async def tg_handle(token: str, upd: dict) -> None:
+    cfg = load_config()
+    n = notify_cfg(cfg)
+    if "callback_query" in upd:
+        cq = upd["callback_query"]
+        chat = cq["message"]["chat"]["id"]
+        if chat not in n["telegram_chats"]:
+            return
+        kind, _, aid = cq.get("data", "").partition(":")
+        await tg_api(token, "answerCallbackQuery", callback_query_id=cq["id"])
+        if kind == "ok":
+            res = await run_proposal(aid)
+            await tg_api(token, "sendMessage", chat_id=chat, text=res["message"][:4000])
+        else:
+            ASSIST_PENDING.pop(aid, None)
+            await tg_api(token, "sendMessage", chat_id=chat, text="Cancelled.")
+        return
+    m = upd.get("message") or {}
+    chat = (m.get("chat") or {}).get("id")
+    text = (m.get("text") or "").strip()
+    if not chat or not text:
+        return
+    if chat not in n["telegram_chats"]:
+        n["telegram_seen"][str(chat)] = (m.get("from") or {}).get("username") or (m.get("chat") or {}).get("first_name") or ""
+        save_config(cfg)
+        await tg_api(token, "sendMessage", chat_id=chat, text=f"This chat isn't allowed yet. Chat ID: {chat}\n"
+                     "In the panel go to Settings > Phone and alerts and click Allow next to this chat.")
+        return
+    cmd, _, arg = text.partition(" ")
+    cmd = cmd.split("@")[0].lower()
+    reply, actions = "", []
+    if cmd in ("/start", "/help"):
+        reply = TG_HELP
+    elif cmd == "/status":
+        reply = await asyncio.to_thread(status_text)
+    elif cmd == "/apps":
+        reply = await asyncio.to_thread(apps_text)
+    elif cmd in ("/start_app", "/stop_app", "/restart_app") and arg:
+        act = cmd[1:].split("_")[0]
+        actions = [propose("app_control", {"app_id": arg.strip(), "action": act}, f"{act.capitalize()} {arg.strip()}")]
+        reply = "Confirm:"
+    elif cmd == "/eco" and arg.strip() in ECO_MODES:
+        actions = [propose("gpu_power", {"mode": arg.strip()}, f"GPU power: {arg.strip()}")]
+        reply = "Confirm:"
+    else:
+        hist = TG_STATE["hist"].setdefault(chat, [])
+        hist.append({"role": "user", "content": text})
+        r = await assistant_chat(hist[-10:])
+        hist.append({"role": "assistant", "content": r["reply"]})
+        del hist[:-10]
+        reply, actions = r["reply"], r["actions"]
+    params = {"chat_id": chat, "text": (reply or "OK")[:4000]}
+    kb = _action_keyboard(actions)
+    if kb:
+        params["reply_markup"] = kb
+    await tg_api(token, "sendMessage", **params)
+
+
+async def telegram_loop() -> None:
+    offset = 0
+    while True:
+        token = notify_cfg(load_config())["telegram_token"]
+        if not token:
+            await asyncio.sleep(10)
+            continue
+        try:
+            r = await tg_api(token, "getUpdates", _timeout=40, offset=offset, timeout=25)
+            for upd in r.get("result", []):
+                offset = upd["update_id"] + 1
+                try:
+                    await tg_handle(token, upd)
+                except Exception as e:
+                    print("telegram handle:", e, file=sys.stderr)
+            if not r.get("ok"):
+                await asyncio.sleep(30)
+        except Exception:
+            await asyncio.sleep(10)
+
+
+# --------------------------------------------------------------------------------------
+# AI assistant: chat with a local model that can look at the server and propose actions
+# --------------------------------------------------------------------------------------
+ASSIST_PENDING: dict[str, dict] = {}
+TOOL_MODEL_HINT = re.compile(r"qwen|llama3\.[123]|llama-3|mistral|hermes|gpt-oss|granite|command-r|deepseek|phi4|gemma3", re.I)
+ASSIST_SYSTEM = """You are the assistant inside "AI Server Control Panel", a web panel that runs a home AI server (Ubuntu, Docker apps, Ollama, llama.cpp, mixed GPUs).
+Help the owner run the server. Use the tools to look things up before answering. Never invent app ids: call list_apps first.
+Tools that change something (install, start/stop, update, uninstall, GPU power, pull model, create video, add domain, install bundle) do NOT run right away:
+they show the user a confirm button. After calling one, tell the user in one short sentence what will happen when they press it.
+Keep answers short and plain. If a log shows an error, explain the likely cause in simple words and propose the fix with a tool when one fits."""
+
+
+def _tool(name: str, desc: str, props: dict, req: list[str]) -> dict:
+    return {"type": "function", "function": {"name": name, "description": desc,
+                                             "parameters": {"type": "object", "properties": props, "required": req}}}
+
+
+_STR = {"type": "string"}
+ASSIST_TOOLS = [
+    _tool("get_status", "CPU, RAM, GPUs (load, VRAM, temperature, power) and disk usage right now.", {}, []),
+    _tool("list_apps", "Search the app store. Returns id, name, category and whether it is installed/running.", {"query": _STR}, []),
+    _tool("list_bundles", "Ready-made sets of apps that are wired together (e.g. private ChatGPT, AI video studio).", {}, []),
+    _tool("list_models", "Ollama models and GGUF files on this server.", {}, []),
+    _tool("read_logs", "Last log lines of an installed app (app id) or a service: ai-panel, ollama, ai-llama, docker.", {"source": _STR}, ["source"]),
+    _tool("install_app", "Install an app from the store.", {"app_id": _STR, "gpu": {"type": "string", "enum": ["auto", "nvidia", "amd", "none"]}}, ["app_id"]),
+    _tool("app_control", "Start, stop, restart, update (pull latest) or uninstall an installed app.",
+          {"app_id": _STR, "action": {"type": "string", "enum": ["start", "stop", "restart", "update", "uninstall"]}}, ["app_id", "action"]),
+    _tool("install_bundle", "Install a ready-made bundle of apps by bundle id.", {"bundle_id": _STR}, ["bundle_id"]),
+    _tool("set_gpu_power", "GPU power mode: max (full speed), balanced (80%), eco (60%, much less power and heat).",
+          {"mode": {"type": "string", "enum": ["max", "balanced", "eco"]}}, ["mode"]),
+    _tool("pull_model", "Download an Ollama model, e.g. qwen3:8b, llama3.2:3b, gemma3:12b.", {"name": _STR}, ["name"]),
+    _tool("create_video", "Make a short video from a topic with MoneyPrinterTurbo (script, voice, subtitles, stock clips).",
+          {"topic": _STR, "aspect": {"type": "string", "enum": ["9:16", "16:9", "1:1"]}}, ["topic"]),
+    _tool("add_domain", "Give the panel or an installed app a domain with automatic HTTPS.", {"domain": _STR, "target": _STR}, ["domain", "target"]),
+]
+
+
+def propose(kind: str, args: dict, label: str) -> dict:
+    aid = secrets.token_hex(6)
+    ASSIST_PENDING[aid] = {"kind": kind, "args": args, "label": label, "t": time.time(), "owner": CURRENT_USER.get()}
+    for k in [k for k, v in ASSIST_PENDING.items() if time.time() - v["t"] > 3600]:
+        ASSIST_PENDING.pop(k, None)
+    return {"id": aid, "kind": kind, "label": label, "args": args}
+
+
+def _find_app(q: str) -> Optional[dict]:
+    q = q.strip().lower()
+    cat = load_catalog()
+    for a in cat:
+        if a["id"] == q:
+            return a
+    for a in cat:
+        if a.get("name", "").lower() == q or q.replace(" ", "-") == a["id"]:
+            return a
+    for a in cat:
+        if q and (q in a["id"] or q in a.get("name", "").lower()):
+            return a
+    return None
+
+
+def load_bundles() -> list[dict]:
+    try:
+        return json.loads(CATALOG_FILE.read_text()).get("bundles", [])
+    except Exception:
+        return []
+
+
+def _log_tail(source: str, lines: int = 80) -> str:
+    if source in ("ai-panel", "ollama", "ai-llama", "docker"):
+        rc, out = run_quick(["journalctl", "-u", source + (".service" if source != "docker" else ""), "-n", str(lines), "--no-pager", "-o", "cat"], timeout=15)
+        return out
+    if APP_ID_RE.match(source) and (APPS_DIR / source / "docker-compose.yml").exists():
+        rc, out = run_quick(compose_cmd(source) + ["logs", "--tail", str(lines), "--no-color"], timeout=20)
+        return out
+    return f"Unknown log source {source}"
+
+
+async def run_tool(name: str, args: dict, actions: list) -> str:
+    if name == "get_status":
+        return await asyncio.to_thread(status_text)
+    if name == "list_apps":
+        q = str(args.get("query") or "").lower()
+        states = await asyncio.to_thread(app_states)
+        rows = []
+        for a in load_catalog():
+            if q and q not in (a["id"] + " " + a.get("name", "") + " " + a.get("category", "") + " " + a.get("description", "")).lower():
+                continue
+            inst = (APPS_DIR / a["id"] / "docker-compose.yml").exists()
+            st = states.get(a["id"])
+            flag = "running" if inst and st and st["running"] else ("installed" if inst else "")
+            rows.append(f"{a['id']}: {a.get('name')} [{a.get('category')}] {flag} - {a.get('description', '')[:80]}")
+        return "\n".join(rows[:40]) or "No apps match."
+    if name == "list_bundles":
+        return "\n".join(f"{b['id']}: {b['name']} = {', '.join(b['apps'])}. {b.get('description', '')}" for b in load_bundles())
+    if name == "list_models":
+        try:
+            tags = await ollama_get("/api/tags")
+            names = [m["name"] for m in tags.get("models", [])]
+        except Exception:
+            names = ["(Ollama not reachable)"]
+        ggufs = [str(p.relative_to(MODELS_DIR)) for p in MODELS_DIR.rglob("*.gguf")][:30]
+        return "Ollama: " + (", ".join(names) or "none") + "\nGGUF: " + (", ".join(ggufs) or "none")
+    if name == "read_logs":
+        return (await asyncio.to_thread(_log_tail, str(args.get("source", "")), 60))[-6000:]
+    # ---- actions: propose, the user confirms in the UI / Telegram
+    if name == "install_app":
+        a = _find_app(str(args.get("app_id", "")))
+        if not a:
+            return "No such app. Call list_apps to find the id."
+        if (APPS_DIR / a["id"] / "docker-compose.yml").exists():
+            return f"{a['name']} is already installed."
+        req = [i for i in a.get("inputs", []) if i.get("required")]
+        if req:
+            return f"{a['name']} needs {', '.join(i.get('label', i['key']) for i in req)}. Tell the user to install it from the App Store page."
+        actions.append(propose("install_app", {"app_id": a["id"], "gpu": args.get("gpu") or "auto"}, f"Install {a['name']}"))
+        return "Confirm button shown to the user."
+    if name == "app_control":
+        aid, act = str(args.get("app_id", "")), str(args.get("action", ""))
+        if not (APPS_DIR / aid / "docker-compose.yml").exists():
+            a = _find_app(aid)
+            aid = a["id"] if a else aid
+        if not (APPS_DIR / aid / "docker-compose.yml").exists():
+            return f"{aid} is not installed."
+        actions.append(propose("app_control", {"app_id": aid, "action": act}, f"{act.capitalize()} {aid}"))
+        return "Confirm button shown to the user."
+    if name == "install_bundle":
+        b = next((b for b in load_bundles() if b["id"] == args.get("bundle_id")), None)
+        if not b:
+            return "No such bundle. Call list_bundles."
+        actions.append(propose("install_bundle", {"bundle_id": b["id"]}, f"Install bundle: {b['name']}"))
+        return "Confirm button shown to the user."
+    if name == "set_gpu_power":
+        mode = str(args.get("mode", ""))
+        if mode not in ECO_MODES:
+            return "mode must be max, balanced or eco"
+        actions.append(propose("gpu_power", {"mode": mode}, f"Set GPU power to {mode}"))
+        return "Confirm button shown to the user."
+    if name == "pull_model":
+        mname = str(args.get("name", ""))
+        if not MODEL_RE.match(mname):
+            return "Invalid model name"
+        actions.append(propose("pull_model", {"name": mname}, f"Download model {mname}"))
+        return "Confirm button shown to the user."
+    if name == "create_video":
+        if not (APPS_DIR / "moneyprinter" / "docker-compose.yml").exists():
+            actions.append(propose("install_app", {"app_id": "moneyprinter", "gpu": "auto"}, "Install MoneyPrinterTurbo"))
+            return "MoneyPrinterTurbo is not installed. An install button was shown. After it's installed, add a free Pexels key in its settings, then ask again."
+        topic = str(args.get("topic", ""))[:300]
+        aspect = args.get("aspect") if args.get("aspect") in ("9:16", "16:9", "1:1") else "9:16"
+        actions.append(propose("create_video", {"topic": topic, "aspect": aspect}, f"Make video: {topic[:40]}"))
+        return "Confirm button shown to the user."
+    if name == "add_domain":
+        actions.append(propose("add_domain", {"domain": str(args.get("domain", "")), "target": str(args.get("target", "panel"))},
+                               f"Add domain {args.get('domain')}"))
+        return "Confirm button shown to the user."
+    return f"Unknown tool {name}"
+
+
+async def _llm_target(cfg: dict) -> tuple[Optional[str], Optional[str], str]:
+    a = cfg.get("assistant", {})
+    prov = a.get("provider", "ollama")
+    if prov == "openai" and a.get("base_url"):
+        return a["base_url"].rstrip("/"), a.get("model") or "gpt-4o-mini", a.get("api_key", "")
+    if prov == "llama":
+        return f"http://127.0.0.1:{cfg['llama']['port']}/v1", "local", ""
+    model = a.get("model", "")
+    if not model:
+        try:
+            tags = await ollama_get("/api/tags", timeout=5)
+            names = [m["name"] for m in tags.get("models", []) if "embed" not in m["name"]]
+            model = next((x for x in names if TOOL_MODEL_HINT.search(x)), names[0] if names else "")
+        except Exception:
+            return None, None, ""
+    return (OLLAMA_URL + "/v1", model, "") if model else (None, None, "")
+
+
+def _simple_intent(text: str, actions: list) -> str:
+    """Works without any AI model: understands short commands."""
+    t = text.lower().strip()
+    m = re.match(r"^(install|add|setup|set up)\s+(.+)$", t)
+    if m:
+        b = next((b for b in load_bundles() if b["id"] in m.group(2) or b["name"].lower() in m.group(2)), None)
+        if b:
+            actions.append(propose("install_bundle", {"bundle_id": b["id"]}, f"Install bundle: {b['name']}"))
+            return f"I can install the {b['name']} bundle."
+        a = _find_app(m.group(2))
+        if a:
+            actions.append(propose("install_app", {"app_id": a["id"], "gpu": "auto"}, f"Install {a['name']}"))
+            return f"I can install {a['name']}: {a.get('description', '')}"
+        return f"I couldn't find an app called \"{m.group(2)}\". Try the App Store search."
+    m = re.match(r"^(start|stop|restart|update|uninstall)\s+(.+)$", t)
+    if m:
+        a = _find_app(m.group(2))
+        if a and (APPS_DIR / a["id"] / "docker-compose.yml").exists():
+            actions.append(propose("app_control", {"app_id": a["id"], "action": m.group(1)}, f"{m.group(1).capitalize()} {a['name']}"))
+            return f"Ready to {m.group(1)} {a['name']}."
+        return "That app isn't installed."
+    for mode in ECO_MODES:
+        if re.search(rf"\b{mode}\b", t) and ("gpu" in t or "power" in t or "mode" in t or t == mode):
+            actions.append(propose("gpu_power", {"mode": mode}, f"Set GPU power to {mode}"))
+            return f"Ready to switch the GPUs to {mode} mode."
+    m = re.search(r"(?:make|create|generate)\s+(?:a\s+)?(?:short\s+)?video\s+(?:about|on|of)\s+(.+)", t)
+    if m:
+        if (APPS_DIR / "moneyprinter" / "docker-compose.yml").exists():
+            actions.append(propose("create_video", {"topic": m.group(1), "aspect": "9:16"}, f"Make video: {m.group(1)[:40]}"))
+            return "Ready to make that video with MoneyPrinterTurbo."
+        actions.append(propose("install_app", {"app_id": "moneyprinter", "gpu": "auto"}, "Install MoneyPrinterTurbo"))
+        return "Videos are made with MoneyPrinterTurbo, which isn't installed yet."
+    if re.search(r"status|how is|health|gpu|temp", t):
+        return status_text()
+    return ("No local AI model is running, so I only understand short commands like \"install jellyfin\", \"restart comfyui\", "
+            "\"gpu eco\", \"status\" or \"make a video about the ocean\". Download a model such as qwen3:8b in AI Models > Ollama for full chat.")
+
+
+async def assistant_chat(messages: list[dict], extra_system: str = "") -> dict:
+    cfg = load_config()
+    actions: list[dict] = []
+    base, model, key = await _llm_target(cfg)
+    last = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+    if not base:
+        return {"reply": await asyncio.to_thread(_simple_intent, last, actions), "actions": actions, "model": None}
+    msgs = [{"role": "system", "content": ASSIST_SYSTEM + ("\n" + extra_system if extra_system else "")}]
+    msgs += [{"role": m["role"], "content": str(m.get("content", ""))[:8000]} for m in messages[-16:] if m.get("role") in ("user", "assistant")]
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    reply = ""
+    try:
+        async with httpx.AsyncClient(timeout=300) as c:
+            for _ in range(6):
+                r = await c.post(base + "/chat/completions", headers=headers,
+                                 json={"model": model, "messages": msgs, "tools": ASSIST_TOOLS, "temperature": 0.2, "stream": False})
+                if r.status_code >= 400:
+                    if "tool" in r.text.lower() and "support" in r.text.lower():
+                        reply = (f"The model {model} can't use tools. Pick one that can (for example qwen3:8b) in Settings > AI assistant.\n\n"
+                                 + await asyncio.to_thread(_simple_intent, last, actions))
+                        break
+                    raise RuntimeError(f"HTTP {r.status_code}: {r.text[:300]}")
+                msg = r.json()["choices"][0]["message"]
+                calls = msg.get("tool_calls") or []
+                if not calls:
+                    reply = msg.get("content") or ""
+                    break
+                msgs.append({"role": "assistant", "content": msg.get("content") or "", "tool_calls": calls})
+                for call in calls:
+                    fn = call.get("function", {})
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}") if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
+                    except Exception:
+                        args = {}
+                    try:
+                        res = await run_tool(fn.get("name", ""), args, actions)
+                    except Exception as e:
+                        res = f"Tool error: {e}"
+                    msgs.append({"role": "tool", "tool_call_id": call.get("id", ""), "content": res[:8000]})
+    except Exception as e:
+        reply = f"(The AI model didn't answer: {e}. Using simple commands instead.)\n\n" + await asyncio.to_thread(_simple_intent, last, actions)
+    reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.S).strip()
+    if not reply and actions:
+        reply = "Press the button to confirm."
+    return {"reply": reply, "actions": actions, "model": model}
+
+
+class ChatBody(BaseModel):
+    messages: list[dict]
+
+
+@app.post("/api/assistant")
+async def assistant_api(body: ChatBody):
+    return await assistant_chat(body.messages)
+
+
+class DiagnoseBody(BaseModel):
+    source: str
+    log: str = ""
+
+
+@app.post("/api/assistant/diagnose")
+async def assistant_diagnose(body: DiagnoseBody):
+    log = body.log[-7000:] or (await asyncio.to_thread(_log_tail, body.source, 120))[-7000:]
+    q = (f"These are the latest log lines from '{body.source}'. Find any errors or warnings, explain the cause in simple words, "
+         f"and say how to fix it. Propose a fix with a tool if one fits (for example restart or update the app).\n\n```\n{log}\n```")
+    return await assistant_chat([{"role": "user", "content": q}])
+
+
+async def run_proposal(aid: str) -> dict:
+    p = ASSIST_PENDING.pop(aid, None)
+    if not p:
+        return {"ok": False, "message": "That button has expired. Ask again."}
+    k, a = p["kind"], p["args"]
+    try:
+        if k == "install_app":
+            r = await install_app(a["app_id"], InstallBody(gpu=a.get("gpu", "auto")))
+            return {"ok": True, "message": f"Installing {a['app_id']}. Follow it in Tasks.", "task": r["task"]}
+        if k == "app_control":
+            if a["action"] == "stop":
+                _expected_stops.add(a["app_id"])
+            r = await app_action(a["app_id"], a["action"])
+            return {"ok": True, "message": f"{a['action'].capitalize()} {a['app_id']} started.", "task": r.get("task")}
+        if k == "install_bundle":
+            r = await bundle_install(a["bundle_id"], BundleBody())
+            return {"ok": True, "message": "Installing the bundle. Follow it in Tasks.", "task": r["task"]}
+        if k == "gpu_power":
+            r = await gpu_power_set(PowerBody(mode=a["mode"]))
+            return {"ok": True, "message": f"GPU power set to {a['mode']}: " + ("; ".join(r["applied"]) or "no GPU power controls found")}
+        if k == "pull_model":
+            r = await ollama_pull(ModelName(name=a["name"]))
+            return {"ok": True, "message": f"Downloading {a['name']}.", "task": r["task"]}
+        if k == "create_video":
+            r = await create_video(a["topic"], a.get("aspect", "9:16"))
+            return {"ok": True, "message": "Making the video. It will be saved in Shared media > videos.", "task": r["task"]}
+        if k == "add_domain":
+            r = await add_domain(DomainBody(domain=a["domain"], target=a["target"]))
+            return {"ok": True, "message": r["message"] + (". " + r["warning"] if r["warning"] else "")}
+    except HTTPException as e:
+        return {"ok": False, "message": str(e.detail)}
+    except Exception as e:
+        return {"ok": False, "message": str(e)}
+    return {"ok": False, "message": "Unknown action"}
+
+
+class ConfirmBody(BaseModel):
+    id: str
+
+
+@app.post("/api/assistant/confirm")
+async def assistant_confirm(body: ConfirmBody):
+    return await run_proposal(body.id)
+
+
+class AssistantCfg(BaseModel):
+    provider: str = "ollama"
+    model: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+@app.get("/api/assistant/config")
+async def assistant_cfg_get():
+    cfg = load_config()
+    a = dict(cfg.get("assistant", {"provider": "ollama", "model": ""}))
+    if a.get("api_key"):
+        a["api_key"] = "set"
+    base, model, _ = await _llm_target(cfg)
+    a["active_model"] = model
+    return a
+
+
+@app.post("/api/assistant/config")
+async def assistant_cfg_set(body: AssistantCfg):
+    if body.provider not in ("ollama", "llama", "openai"):
+        raise HTTPException(400, "provider must be ollama, llama or openai")
+    cfg = load_config()
+    old = cfg.get("assistant", {})
+    cfg["assistant"] = {"provider": body.provider, "model": body.model.strip(), "base_url": body.base_url.strip(),
+                        "api_key": old.get("api_key", "") if body.api_key == "set" else body.api_key.strip()}
+    save_config(cfg)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------------------
+# Make a video with MoneyPrinterTurbo's API, then copy it to the shared media folder
+# --------------------------------------------------------------------------------------
+MPT_API = "http://127.0.0.1:8080/api/v1"
+
+
+async def create_video(topic: str, aspect: str = "9:16") -> dict:
+    conf = DATA_DIR / "moneyprinter" / "config.toml"
+    if conf.exists() and re.search(r'^\s*pexels_api_keys\s*=\s*\[\s*\]', conf.read_text(), re.M):
+        raise HTTPException(400, "Add a free Pexels API key in MoneyPrinterTurbo's settings first (Basic settings > Pexels API key).")
+    t = new_task("video", f"Video: {topic[:50]}")
+    t["progress"] = 0
+
+    async def run():
+        try:
+            async with httpx.AsyncClient(timeout=60) as c:
+                r = await c.post(MPT_API + "/videos", json={"video_subject": topic, "video_aspect": aspect, "subtitle_enabled": True})
+                if r.status_code >= 400:
+                    raise RuntimeError(f"MoneyPrinterTurbo API: HTTP {r.status_code} {r.text[:200]}")
+                tid = r.json()["data"]["task_id"]
+                task_log(t, f"MoneyPrinterTurbo task {tid}")
+                for _ in range(720):
+                    await asyncio.sleep(5)
+                    d = (await c.get(f"{MPT_API}/tasks/{tid}")).json().get("data", {})
+                    t["progress"] = int(d.get("progress") or 0)
+                    if d.get("state") == -1:
+                        raise RuntimeError("MoneyPrinterTurbo reported a failure. Open its web UI to see why.")
+                    if d.get("videos") or (d.get("state") == 1 and t["progress"] >= 100):
+                        break
+                else:
+                    raise RuntimeError("Timed out after 1 hour")
+            src = DATA_DIR / "moneyprinter" / "storage" / "tasks" / tid
+            dest = DATA_DIR / "shared-media" / "videos"
+            dest.mkdir(parents=True, exist_ok=True)
+            n = 0
+            for f in sorted(src.glob("final-*.mp4")):
+                name = re.sub(r"[^\w\- ]", "", topic)[:40].strip().replace(" ", "_") or "video"
+                shutil.copy2(f, dest / f"{name}_{tid[:6]}_{f.stem[-1]}.mp4")
+                n += 1
+            task_done(t, True, f"Done: {n} video(s) saved to {dest}")
+            await notify(f"🎬 Video ready: {topic[:80]}")
+        except Exception as e:
+            task_done(t, False, str(e))
+    asyncio.create_task(run())
+    return {"task": t["id"]}
+
+
+# --------------------------------------------------------------------------------------
+# Bundles: several apps installed together, already wired to each other
+# --------------------------------------------------------------------------------------
+@app.get("/api/bundles")
+async def bundles_list():
+    out = []
+    for b in load_bundles():
+        inst = [a for a in b["apps"] if (APPS_DIR / a / "docker-compose.yml").exists()]
+        out.append({**b, "installed": inst})
+    return out
+
+
+class BundleBody(BaseModel):
+    gpu: str = "auto"
+    inputs: dict[str, dict[str, str]] = {}
+
+
+@app.post("/api/bundles/{bid}/install")
+async def bundle_install(bid: str, body: BundleBody):
+    b = next((x for x in load_bundles() if x["id"] == bid), None)
+    if not b:
+        raise HTTPException(404, "No such bundle")
+    t = new_task("bundle", f"Bundle: {b['name']}")
+    t["progress"] = 0
+
+    async def run():
+        ok = True
+        todo = b["apps"]
+        for i, aid in enumerate(todo):
+            if (APPS_DIR / aid / "docker-compose.yml").exists():
+                task_log(t, f"{aid}: already installed, skipped")
+                continue
+            try:
+                r = await install_app(aid, InstallBody(gpu=body.gpu, inputs=body.inputs.get(aid, {}), env=(b.get("env") or {}).get(aid, {})))
+                task_log(t, f"{aid}: installing...")
+                sub = TASKS[r["task"]]
+                while sub["status"] == "running":
+                    await asyncio.sleep(2)
+                task_log(t, f"{aid}: {'done' if sub['status'] == 'done' else 'FAILED - ' + sub['message']}")
+                ok = ok and sub["status"] == "done"
+            except HTTPException as e:
+                task_log(t, f"{aid}: skipped - {e.detail}")
+                ok = False
+            t["progress"] = int(100 * (i + 1) / len(todo))
+        task_done(t, ok, (b.get("notes") or "All apps installed") if ok else "Some apps failed, see the log above")
+    asyncio.create_task(run())
+    return {"task": t["id"]}
+
+
+# --------------------------------------------------------------------------------------
+# Live logs (Server-Sent Events): apps, panel services, Docker, the HTTPS proxy and system errors
+# --------------------------------------------------------------------------------------
+LOG_SERVICES = {"ai-panel": "AI Panel", "ollama": "Ollama", "ai-llama": "llama.cpp server", "docker": "Docker"}
+
+
+@app.get("/api/logs/sources")
+async def log_sources(request: Request):
+    admin = request.state.role == "admin"
+    out = []
+    for d in sorted(APPS_DIR.iterdir()) if APPS_DIR.exists() else []:
+        if (d / "docker-compose.yml").exists() and (admin or d.name in request.state.apps):
+            out.append({"id": "app:" + d.name, "name": d.name, "group": "Apps"})
+    if admin:
+        out += [{"id": "svc:" + k, "name": v, "group": "Services"} for k, v in LOG_SERVICES.items()]
+        out += [{"id": "proxy", "name": "HTTPS proxy (Caddy)", "group": "Services"},
+                {"id": "errors", "name": "All system errors", "group": "System"},
+                {"id": "kernel", "name": "Kernel (GPU drivers, disks)", "group": "System"}]
+    return out
+
+
+def _log_cmd(source: str, tail: int) -> list[str]:
+    if source.startswith("app:") and APP_ID_RE.match(source[4:]) and (APPS_DIR / source[4:] / "docker-compose.yml").exists():
+        return compose_cmd(source[4:]) + ["logs", "-f", "--tail", str(tail), "--no-color", "--timestamps"]
+    if source.startswith("svc:") and source[4:] in LOG_SERVICES:
+        unit = source[4:] + ("" if source[4:] == "docker" else ".service")
+        return ["journalctl", "-u", unit, "-f", "-n", str(tail), "--no-pager", "-o", "short-iso"]
+    if source == "proxy":
+        return ["docker", "logs", "-f", "--tail", str(tail), "aipanel-proxy"]
+    if source == "errors":
+        return ["journalctl", "-p", "err", "-f", "-n", str(tail), "--no-pager", "-o", "short-iso"]
+    if source == "kernel":
+        return ["journalctl", "-k", "-f", "-n", str(tail), "--no-pager", "-o", "short-iso"]
+    raise HTTPException(400, "Unknown log source")
+
+
+@app.get("/api/logs/stream")
+async def log_stream(source: str, request: Request, tail: int = 200):
+    if request.state.role != "admin" and not (source.startswith("app:") and source[4:] in request.state.apps):
+        raise HTTPException(403, "Only an admin can do this")
+    cmd = _log_cmd(source, max(10, min(tail, 5000)))
+    try:
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    except FileNotFoundError:
+        raise HTTPException(400, f"{cmd[0]} is not available on this server")
+
+    async def gen():
+        try:
+            yield "retry: 3000\n\n"
+            while True:
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(), 15)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        break
+                    yield ": ping\n\n"
+                    continue
+                if not line:
+                    yield "event: end\ndata: (log stream ended)\n\n"
+                    break
+                yield "data: " + line.decode(errors="replace").rstrip("\n").replace("\r", "") + "\n\n"
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# --------------------------------------------------------------------------------------
+# Phone: installable web app (PWA)
+# --------------------------------------------------------------------------------------
+ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="96" fill="#0b1220"/>'
+            '<text x="256" y="330" font-size="300" text-anchor="middle">🧠</text></svg>')
+
+
+@app.get("/manifest.webmanifest")
+async def manifest():
+    return JSONResponse({"name": "AI Server Control", "short_name": "AI Server", "start_url": "/", "display": "standalone",
+                         "background_color": "#0b1220", "theme_color": "#0b1220",
+                         "icons": [{"src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}]},
+                        media_type="application/manifest+json")
+
+
+@app.get("/icon.svg")
+async def icon_svg():
+    return Response(ICON_SVG, media_type="image/svg+xml", headers={"Cache-Control": "max-age=86400"})
 
 
 # --------------------------------------------------------------------------------------
