@@ -14,7 +14,7 @@ sudo bash install_app.sh
 | | |
 |---|---|
 | ![AI models](docs/screenshots/llama-cpp.png) | ![App Store](docs/screenshots/app-store.png) |
-| **llama.cpp mixed-GPU pool**: NVIDIA + AMD + Intel in one model | **1-click App Store**: 48 apps with GPU passthrough |
+| **llama.cpp mixed-GPU pool**: NVIDIA + AMD + Intel in one model | **1-click App Store**: 52 apps with GPU passthrough |
 | ![GPU pools](docs/screenshots/gpu-pools.png) | ![Terminal](docs/screenshots/terminal.png) |
 | **GPU pools**: e.g. "AI" cards vs "Media" cards | **Browser terminal**: full root shell, no SSH |
 
@@ -50,7 +50,7 @@ Drive health uses `smartmontools`, and RAM stick details use `dmidecode`. The in
 |---|---|
 | `install_app.sh` | 1-step installer and upgrader (Docker, NVIDIA toolkit, Ollama, llama.cpp Vulkan, systemd) |
 | `app.py` | FastAPI backend (auth, Ollama, llama.cpp, App Store, GPU stats, WebSocket terminal, updates) |
-| `apps_catalog.json` | 48 one-click apps |
+| `apps_catalog.json` | 52 one-click apps |
 | `index.html` | Dark-mode single-page dashboard |
 | `static/` | Tailwind CSS and xterm.js served locally, so the panel works without internet in the browser |
 
@@ -198,3 +198,14 @@ Reset a forgotten password:
 | **Video editing** | Kdenlive, Shotcut, OpenShot, HandBrake (convert and compress) |
 | **Photo and 3D** | GIMP, Krita, darktable, digiKam, PhotoPrism, Blender |
 | **Handy tools** | Stirling PDF, Paperless-ngx, IT-Tools, Excalidraw |
+| **Music** | ACE-Step (AI song maker), Vocal Remover (Spleeter Web), Karaoke Eternal, Navidrome |
+
+### Make a karaoke or lyric video
+
+1. **Get a song you are allowed to use.** Make your own in ACE-Step, use a song you wrote, or use music with a licence that allows remixes and video use.
+2. **Vocal Remover:** upload the song and download the instrumental (karaoke) track and the vocals track.
+3. **Whisper:** send the vocals track to `/asr?output=srt` (or use the `/docs` test page) to get timed lyric subtitles. Fix any wrong words in a text editor.
+4. **Kdenlive or Shotcut:** put the instrumental, a background video or picture, and the `.srt` file together, then render. HandBrake can also burn subtitles into a finished video.
+5. **Karaoke Eternal:** drop finished MP4s into `/opt/ai-panel/data/shared-media/karaoke` to sing them at home.
+
+**Copyright:** removing vocals or adding subtitles does not make a song yours. Uploading a karaoke version of someone else's song, including one taken from YouTube or YouTube Music, usually breaks copyright and gets caught by Content ID, even if you change it. Songs you create in ACE-Step (Apache-2.0) are yours to use. Check the licence of any other music before you publish.

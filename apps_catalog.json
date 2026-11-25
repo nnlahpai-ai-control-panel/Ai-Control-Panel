@@ -507,6 +507,79 @@
       "website": "https://libretranslate.com"
     },
     {
+      "id": "ace-step",
+      "name": "ACE-Step (AI music)",
+      "category": "Music",
+      "icon": "🎵",
+      "port": 7870,
+      "description": "Make original full songs from a text prompt and your own lyrics, with vocals, in many languages and styles. Apache-2.0, so you can use what you make.",
+      "compose": "services:\n  ace-step:\n    image: spaceinvaderone/ace-step:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:7860\"\n    environment:\n      ACESTEP_LM_BACKEND: pt\n    volumes:\n      - ${DATA_DIR}/checkpoints:/app/checkpoints\n      - ${DATA_DIR}/outputs:/app/gradio_outputs\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "gpu": {
+        "services": [
+          "ace-step"
+        ]
+      },
+      "website": "https://github.com/ace-step/ACE-Step-1.5",
+      "notes": "NVIDIA GPU needed (8GB+ VRAM, 12GB+ for best quality). The first start downloads about 10GB of models. Without a GPU it runs very slowly on the CPU. Set ACESTEP_OFFLOAD_CPU=true in the compose file for small cards."
+    },
+    {
+      "id": "spleeter-web",
+      "name": "Vocal Remover (Spleeter Web)",
+      "category": "Music",
+      "icon": "🎤",
+      "port": 8098,
+      "description": "Split any song you upload into vocals, drums, bass and music with Demucs or Spleeter, then mix your own karaoke (instrumental) track.",
+      "compose": "services:\n  redis:\n    image: redis:7-alpine\n    restart: unless-stopped\n    volumes:\n      - ${DATA_DIR}/redis:/data\n  nginx:\n    image: jeffreyca/spleeter-web-nginx:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:80\"\n    environment:\n      API_HOST: api\n      CERTBOT_CERT_NAME: spleeter-web\n      CERTBOT_DOMAIN: \".\"\n      CERTBOT_EMAIL: \".\"\n      UPLOAD_FILE_SIZE_LIMIT: \"200\"\n    volumes:\n      - ${DATA_DIR}/nginx/templates:/etc/nginx/templates\n      - ${DATA_DIR}/staticfiles:/webapp/staticfiles\n      - ${DATA_DIR}/media:/webapp/media\n    depends_on:\n      - api\n  api:\n    image: jeffreyca/spleeter-web-backend:latest\n    restart: unless-stopped\n    stdin_open: true\n    tty: true\n    environment: &sw-env\n      TF_CPP_MIN_LOG_LEVEL: \"2\"\n      DJANGO_SETTINGS_MODULE: django_react.settings_docker\n      CELERY_BROKER_URL: redis://redis:6379/0\n      CELERY_RESULT_BACKEND: redis://redis:6379/0\n      CPU_SEPARATION: \"1\"\n      ALLOW_ALL_HOSTS: \"1\"\n      DEFAULT_FILE_STORAGE: FILE\n      UPLOAD_FILE_SIZE_LIMIT: \"200\"\n      CELERY_FAST_QUEUE_CONCURRENCY: \"2\"\n      CELERY_SLOW_QUEUE_CONCURRENCY: \"1\"\n    volumes:\n      - ${DATA_DIR}/assets:/webapp/frontend/assets\n      - ${DATA_DIR}/sqlite:/webapp/sqlite\n      - ${DATA_DIR}/staticfiles:/webapp/staticfiles\n      - ${DATA_DIR}/media:/webapp/media\n    depends_on:\n      - redis\n      - frontend\n  celery-fast:\n    image: jeffreyca/spleeter-web-backend:latest\n    restart: unless-stopped\n    entrypoint: ./celery-fast-entrypoint.sh\n    environment: *sw-env\n    volumes:\n      - ${DATA_DIR}/celery:/webapp/celery\n      - ${DATA_DIR}/models:/webapp/pretrained_models\n      - ${DATA_DIR}/sqlite:/webapp/sqlite\n      - ${DATA_DIR}/media:/webapp/media\n    depends_on:\n      - redis\n  celery-slow:\n    image: jeffreyca/spleeter-web-backend:latest\n    restart: unless-stopped\n    entrypoint: ./celery-slow-entrypoint.sh\n    environment: *sw-env\n    volumes:\n      - ${DATA_DIR}/celery:/webapp/celery\n      - ${DATA_DIR}/models:/webapp/pretrained_models\n      - ${DATA_DIR}/sqlite:/webapp/sqlite\n      - ${DATA_DIR}/media:/webapp/media\n    depends_on:\n      - redis\n  frontend:\n    image: jeffreyca/spleeter-web-frontend:latest\n    restart: \"no\"\n    stdin_open: true\n    tty: true\n    volumes:\n      - ${DATA_DIR}/assets:/webapp/frontend/assets\n",
+      "seed_files": {
+        "nginx/templates/default.conf.template": "https://raw.githubusercontent.com/JeffreyCA/spleeter-web/master/nginx/templates/default.conf.template"
+      },
+      "gpu": {
+        "services": [
+          "api",
+          "celery-fast",
+          "celery-slow"
+        ],
+        "images": {
+          "nvidia": "jeffreyca/spleeter-web-backend:latest-gpu"
+        },
+        "env": {
+          "nvidia": {
+            "CPU_SEPARATION": "0"
+          }
+        }
+      },
+      "website": "https://github.com/JeffreyCA/spleeter-web",
+      "notes": "Only use songs you own or have permission to use. Demucs on CPU takes a few minutes per song. With NVIDIA it takes seconds (about 7GB VRAM)."
+    },
+    {
+      "id": "karaoke-eternal",
+      "name": "Karaoke Eternal",
+      "category": "Music",
+      "icon": "🎙️",
+      "port": 8097,
+      "description": "Host karaoke parties: guests queue songs from their phones, lyrics show on the TV. Plays MP4 and MP3+CDG karaoke files.",
+      "compose": "services:\n  karaoke:\n    image: radrootllc/karaoke-eternal:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:8080\"\n    volumes:\n      - ${DATA_DIR}/config:/config\n      - /opt/ai-panel/data/shared-media:/media\n",
+      "website": "https://www.karaoke-eternal.com",
+      "notes": "Create the admin account on first visit. Add /media/karaoke as a media folder, then put your karaoke videos in /opt/ai-panel/data/shared-media/karaoke."
+    },
+    {
+      "id": "navidrome",
+      "name": "Navidrome",
+      "category": "Music",
+      "icon": "🎧",
+      "port": 4533,
+      "description": "Your own music streaming server, like Spotify, for the music you own. Works with phone apps.",
+      "compose": "services:\n  navidrome:\n    image: deluan/navidrome:latest\n    restart: unless-stopped\n    ports:\n      - \"${APP_PORT}:4533\"\n    volumes:\n      - ${DATA_DIR}/data:/data\n      - /opt/ai-panel/data/shared-media/music:/music:ro\n",
+      "chown": {
+        "uid": 1000,
+        "dirs": [
+          "data"
+        ]
+      },
+      "website": "https://www.navidrome.org",
+      "notes": "Put music in /opt/ai-panel/data/shared-media/music. Songs you make in ACE-Step can go there too."
+    },
+    {
       "id": "kdenlive",
       "name": "Kdenlive (video editor)",
       "category": "Studio",
