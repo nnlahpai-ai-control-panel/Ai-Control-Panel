@@ -14,7 +14,7 @@
 </div>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nnlahpai-ai-control-panel/ai-control-panel/main/install_app.sh -o install_app.sh
+curl -fsSL https://raw.githubusercontent.com/nnlahpai-ai-control-panel/Ai-Control-Panel/main/install_app.sh -o install_app.sh
 sudo bash install_app.sh
 ```
 
@@ -146,7 +146,7 @@ Drive health uses `smartmontools`, and RAM stick details use `dmidecode`. The in
 On a fresh Ubuntu Server, run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nnlahpai-ai-control-panel/ai-control-panel/main/install_app.sh -o install_app.sh
+curl -fsSL https://raw.githubusercontent.com/nnlahpai-ai-control-panel/Ai-Control-Panel/main/install_app.sh -o install_app.sh
 sudo bash install_app.sh
 echo "Open http://$(hostname -I | awk '{print $1}'):1234  (login printed above)"
 ```

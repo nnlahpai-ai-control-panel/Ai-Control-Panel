@@ -92,6 +92,9 @@ def load_config() -> dict:
             changed = True
         cfg.setdefault("users", {})
         cfg.setdefault("update_url", os.environ.get("AIPANEL_UPDATE_URL", ""))
+        if "/nnlahpai-ai-control-panel/ai-control-panel/" in cfg["update_url"] + "/":
+            cfg["update_url"] = cfg["update_url"].replace("/ai-control-panel/ai-control-panel", "/ai-control-panel/Ai-Control-Panel")
+            changed = True
         llama = cfg.setdefault("llama", {})
         for k, v in DEFAULT_LLAMA.items():
             llama.setdefault(k, v)

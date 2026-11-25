@@ -23,7 +23,7 @@ PANEL_HOME=/opt/ai-panel
 PORT=1234
 INSTALL_DRIVERS=1
 ONLY_ENGINES=0
-SOURCE_URL="${AIPANEL_SOURCE:-https://raw.githubusercontent.com/nnlahpai-ai-control-panel/ai-control-panel/main}"
+SOURCE_URL="${AIPANEL_SOURCE:-https://raw.githubusercontent.com/nnlahpai-ai-control-panel/Ai-Control-Panel/main}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || pwd)"
 export DEBIAN_FRONTEND=noninteractive
 
