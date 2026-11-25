@@ -294,7 +294,7 @@
         <button id="pwBtn" class="btn btn-p">Update password</button>
         <p id="pwMsg" class="text-sm"></p>
       </div>
-      <div class="card p-5 space-y-3">
+      <div class="card p-5 space-y-3 admin-only">
         <h2 class="text-lg font-bold">Updates</h2>
         <div id="sysInfo" class="text-sm text-slate-400 space-y-1"></div>
         <label class="text-sm block">Update source (folder URL holding app.py, index.html, apps_catalog.json)
@@ -307,6 +307,29 @@
           <button id="updEngines" class="btn btn-g">Update Ollama + llama.cpp</button>
         </div>
         <p id="updMsg" class="text-sm"></p>
+      </div>
+      <div class="card p-5 space-y-3 lg:col-span-2 admin-only">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div><h2 class="text-lg font-bold">👥 Users and roles</h2>
+            <p class="text-sm text-slate-400"><b>Admin</b> can do everything. <b>User</b> only sees the apps you tick, and can open, start, stop, restart, update and read logs for them. Users can't install apps, use the terminal or files, or see the GPU and system pages.</p></div>
+          <button id="userAdd" class="btn btn-p">＋ Add user</button>
+        </div>
+        <div id="userList" class="overflow-x-auto"></div>
+      </div>
+      <div class="card p-5 space-y-3 lg:col-span-2 admin-only">
+        <div class="flex flex-wrap justify-between items-center gap-2">
+          <div><h2 class="text-lg font-bold">🌐 Domains and automatic HTTPS</h2>
+            <p class="text-sm text-slate-400">Give the panel or any app its own address like <code>chat.example.com</code>. A free Let's Encrypt certificate is issued and renewed for you. Point the domain's DNS (A record) at <b id="pubIp">this server</b> and forward ports 80 and 443 on your router.</p></div>
+          <button id="domAdd" class="btn btn-p">＋ Add domain</button>
+        </div>
+        <div id="domList" class="overflow-x-auto"></div>
+        <p class="text-xs text-slate-500">No public IP or can't open ports? Use <b>Cloudflare Tunnel</b> from the App Store instead. For names only used at home (like <code>nas.lan</code>), choose "Local network" and the panel makes its own certificate.</p>
+      </div>
+      <div class="card p-5 space-y-3 lg:col-span-2 admin-only">
+        <h2 class="text-lg font-bold">🛍️ App store sources</h2>
+        <p class="text-sm text-slate-400">Add more app catalogs by URL: your own GitHub repo, a friend's, or a community list. The file uses the same format as <code>apps_catalog.json</code>. A GitHub repo link works if the repo has <code>apps_catalog.json</code> at the top. <b class="text-amber-300">Only add sources you trust</b>, because apps run as Docker containers on this server.</p>
+        <div class="flex flex-wrap gap-2"><input id="srcUrl" class="inp flex-1 min-w-[16rem]" placeholder="https://github.com/user/my-apps  or  https://example.com/apps.json"><input id="srcName" class="inp !w-44" placeholder="Name (optional)"><button id="srcAddBtn" class="btn btn-p">Add source</button><button id="srcRefresh" class="btn btn-g">↻ Refresh all</button></div>
+        <div id="srcList" class="text-sm divide-y divide-ink-800"></div>
       </div>
       <div class="card p-5 space-y-3 lg:col-span-2">
         <h2 class="text-lg font-bold">App secrets</h2>
@@ -383,14 +406,16 @@ $('#logoutBtn').onclick = async () => { await post('/api/logout'); if (term.ws) 
 async function start() {
   let me; try { me = await api('/api/me'); } catch { return showLogin(); }
   $('#login').classList.add('hidden'); $('#main').classList.remove('hidden');
-  $('#hostname').textContent = `${me.user}@${me.hostname} · v${me.version}`; $('#termHost').textContent = me.hostname;
-  showTab(location.hash.slice(1) || 'dash'); startPolling();
+  ME = me; applyRole();
+  $('#hostname').textContent = `${me.user}@${me.hostname} · v${me.version}${me.role === 'admin' ? '' : ' · user'}`; $('#termHost').textContent = me.hostname;
+  showTab(location.hash.slice(1) || (isAdmin() ? 'dash' : 'apps')); startPolling();
 }
 
 // ===================================================================== tabs
 let currentTab = 'dash';
 function showTab(t) {
   if (!$('#tab-' + t)) t = 'dash';
+  if (!isAdmin() && !USER_TABS.includes(t)) t = 'apps';
   currentTab = t; history.replaceState(null, '', '#' + t);
   $$('#tabs .tab').forEach(b => b.classList.toggle('active', b.dataset.tab === t));
   $$('main > section').forEach(s => s.classList.toggle('hidden', s.id !== 'tab-' + t));
@@ -695,7 +720,7 @@ async function loadApps() {
   renderApps();
 }
 const statusPill = { running: 'bg-green-900 text-green-300', stopped: 'bg-ink-700 text-slate-300', partial: 'bg-amber-900 text-amber-200', not_installed: '' };
-function appUrl(a) { return a.port ? `${a.scheme}://${HOST}:${a.port}${a.path || '/'}` : null; }
+function appUrl(a) { return a.domain ? `https://${a.domain}${a.path || '/'}` : a.port ? `${a.scheme}://${HOST}:${a.port}${a.path || '/'}` : null; }
 function renderApps() {
   $$('#catBtns button').forEach(b => { b.classList.toggle('btn-p', b.textContent === appCat); b.classList.toggle('btn-g', b.textContent !== appCat); });
   const f = $('#appFilter').value.toLowerCase();
@@ -705,13 +730,13 @@ function renderApps() {
     const url = appUrl(a);
     return `<div class="card p-4 flex flex-col">
       <div class="flex gap-3 items-start"><div class="text-3xl">${esc(a.icon || '📦')}</div>
-        <div class="min-w-0 flex-1"><div class="font-bold flex items-center gap-2 flex-wrap">${esc(a.name)} ${a.gpu ? `<span class="pill bg-violet-900 text-violet-200">GPU${a.gpu_pool ? ' · ' + esc(poolName(a.gpu_pool)) : ''}</span>` : ''}${a.custom ? '<span class="pill bg-ink-700">custom</span>' : ''}</div>
+        <div class="min-w-0 flex-1"><div class="font-bold flex items-center gap-2 flex-wrap">${esc(a.name)} ${a.gpu ? `<span class="pill bg-violet-900 text-violet-200">GPU${a.gpu_pool ? ' · ' + esc(poolName(a.gpu_pool)) : ''}</span>` : ''}${a.custom ? '<span class="pill bg-ink-700">custom</span>' : ''}${a.source ? `<span class="pill bg-ink-700" title="From app source ${esc(a.source)}">${esc(a.source)}</span>` : ''}${a.domain ? `<span class="pill bg-emerald-900 text-emerald-200">🔒 ${esc(a.domain)}</span>` : ''}</div>
         <div class="text-xs text-slate-500">${esc(a.category)}${a.port ? ' · port ' + a.port : ''}</div></div>
         ${a.installed ? `<span class="pill ${statusPill[a.status]}">${a.status}</span>` : ''}</div>
       <p class="text-sm text-slate-400 mt-2 flex-1">${esc(a.description)}</p>
       <div id="ap-${a.id}"></div>
       <div class="flex flex-wrap gap-2 mt-3">
-      ${!a.installed ? `<button class="btn btn-p" onclick="installDialog('${a.id}')">⬇ Install</button>${a.custom ? `<button class="btn btn-g" onclick="removeCustom('${a.id}')">Remove</button>` : ''}` : `
+      ${!a.installed ? (!isAdmin() ? '' : `<button class="btn btn-p" onclick="installDialog('${a.id}')">⬇ Install</button>${a.custom ? `<button class="btn btn-g" onclick="removeCustom('${a.id}')">Remove</button>` : ''}`) : `
         ${url && a.status !== 'stopped' ? `<a class="btn btn-s" href="${url}" target="_blank" rel="noopener">↗ Open</a>` : ''}
         ${a.status === 'running' ? `<button class="btn btn-g" onclick="appAction('${a.id}','stop')">■ Stop</button>` : `<button class="btn btn-s" onclick="appAction('${a.id}','start')">▶ Start</button>`}
         <button class="btn btn-g" onclick="appAction('${a.id}','update')" title="Pull latest image and recreate">🔄</button>
@@ -899,6 +924,86 @@ $('#fSelMove').onclick = () => fMoveDlg([...files.sel]);
 $('#fNewDir').onclick = async () => { const n = prompt('Folder name'); if (n) await guard(async () => { await post('/api/files/mkdir', { path: fJoin(files.path, n) }); openDir(files.path); }); };
 $('#fNewFile').onclick = async () => { const n = prompt('File name'); if (n) await guard(async () => { await post('/api/files/write', { path: fJoin(files.path, n), content: '' }); await openDir(files.path); fEdit(fJoin(files.path, n)); }); };
 function openAppFiles(id) { closeModal(); showTab('files'); setTimeout(() => openDir((files.base['App data'] || '/opt/ai-panel/data') + '/' + id), 200); }
+
+// ===================================================================== roles
+let ME = { role: 'admin', apps: [] };
+const isAdmin = () => ME.role === 'admin';
+const USER_TABS = ['apps', 'settings'];
+function applyRole() {
+  $$('#tabs .tab').forEach(b => { b.style.display = !isAdmin() && !USER_TABS.includes(b.dataset.tab) ? 'none' : ''; });
+  $$('.admin-only').forEach(el => el.classList.toggle('hidden', !isAdmin()));
+  ['#customBtn', '#updateAllApps'].forEach(s => $(s) && $(s).classList.toggle('hidden', !isAdmin()));
+}
+
+// ===================================================================== users
+async function loadUsers() {
+  const us = await api('/api/users'); const names = Object.fromEntries(appsCache.map(a => [a.id, a.name]));
+  $('#userList').innerHTML = `<table class="w-full text-sm"><thead><tr class="text-left text-slate-400 border-b border-ink-800"><th class="py-1">User</th><th>Role</th><th>Apps</th><th></th></tr></thead><tbody>` +
+    us.map(u => `<tr class="border-b border-ink-800"><td class="py-2 font-medium">${esc(u.username)}${u.username === ME.user ? ' <span class="text-xs text-slate-500">(you)</span>' : ''}</td>
+      <td><span class="pill ${u.role === 'admin' ? 'bg-violet-900 text-violet-200' : 'bg-ink-700'}">${u.role}</span></td>
+      <td class="text-slate-400">${u.role === 'admin' ? 'All' : (u.apps.map(a => esc(names[a] || a)).join(', ') || '<span class="text-amber-300">none yet</span>')}</td>
+      <td class="text-right whitespace-nowrap"><button class="btn btn-g !py-1" onclick='userDialog(${jq(u)})'>Edit</button>${u.username !== ME.user ? ` <button class="btn btn-d !py-1" onclick="userDel(${jq(u.username)})">Delete</button>` : ''}</td></tr>`).join('') + '</tbody></table>';
+}
+function userDialog(u) {
+  const isNew = !u; u = u || { username: '', role: 'user', apps: [] };
+  const inst = appsCache.filter(a => a.installed);
+  openModal(isNew ? 'Add user' : 'Edit ' + u.username, `<div class="space-y-3 text-sm">
+    <label class="block">Username<input id="uName" class="inp mt-1" value="${esc(u.username)}" ${isNew ? '' : 'disabled'} placeholder="e.g. anna"></label>
+    <label class="block">${isNew ? 'Password (8+ characters)' : 'New password (leave empty to keep)'}<input id="uPw" type="password" class="inp mt-1" autocomplete="new-password"></label>
+    <label class="block">Role<select id="uRole" class="inp mt-1"><option value="user">User: only the apps ticked below</option><option value="admin">Admin: everything</option></select></label>
+    <div id="uAppsBox"><div class="mb-1">Apps this user can control</div>
+      <div class="grid sm:grid-cols-2 gap-1 max-h-64 overflow-auto">${inst.map(a => `<label class="flex items-center gap-2"><input type="checkbox" class="accent-sky-500 uApp" value="${esc(a.id)}" ${u.apps.includes(a.id) ? 'checked' : ''}> ${esc(a.icon || '')} ${esc(a.name)}</label>`).join('') || '<p class="text-slate-500">Install an app first.</p>'}</div></div>
+    <div class="flex justify-end gap-2"><button class="btn btn-g" onclick="closeModal()">Cancel</button><button id="uSave" class="btn btn-p">Save</button></div></div>`);
+  $('#uRole').value = u.role; const sync = () => $('#uAppsBox').classList.toggle('hidden', $('#uRole').value === 'admin'); $('#uRole').onchange = sync; sync();
+  $('#uSave').onclick = e => guard(async () => {
+    await post('/api/users', { username: $('#uName').value.trim(), password: $('#uPw').value, role: $('#uRole').value, apps: $$('.uApp').filter(c => c.checked).map(c => c.value) });
+    closeModal(); toast('User saved'); loadUsers();
+  }, e.target);
+}
+async function userDel(n) { if (!confirm(`Delete user ${n}?`)) return; await guard(async () => { await api('/api/users/' + encodeURIComponent(n), { method: 'DELETE' }); loadUsers(); }); }
+$('#userAdd').onclick = () => userDialog(null);
+
+// ===================================================================== app store sources
+async function loadSources() {
+  const ss = await api('/api/catalog-sources');
+  $('#srcList').innerHTML = ss.length ? ss.map(s => `<div class="py-2 flex flex-wrap items-center gap-2"><div class="flex-1 min-w-0"><div class="font-medium">${esc(s.name)} <span class="text-slate-400 font-normal">· ${s.apps} apps${s.skipped ? `, ${s.skipped} skipped` : ''}</span></div>
+      <div class="text-xs text-slate-500 break-all">${esc(s.url)} · updated ${new Date(s.updated * 1000).toLocaleString()}</div>${s.error ? `<div class="text-xs text-red-400">${esc(s.error)}</div>` : ''}</div>
+      <button class="btn btn-d !py-1" onclick="srcDel(${jq(s.id)})">Remove</button></div>`).join('') : '<p class="text-slate-500 py-2">Only the built-in catalog is used.</p>';
+}
+async function srcDel(id) { if (!confirm('Remove this app source? Installed apps keep running.')) return; await guard(async () => { await api('/api/catalog-sources/' + id, { method: 'DELETE' }); loadSources(); }); }
+$('#srcAddBtn').onclick = e => guard(async () => { const s = await post('/api/catalog-sources', { url: $('#srcUrl').value.trim(), name: $('#srcName').value.trim() }); toast(`Added ${s.name}: ${s.apps} apps`); $('#srcUrl').value = $('#srcName').value = ''; loadSources(); }, e.target);
+$('#srcRefresh').onclick = e => guard(async () => { await post('/api/catalog-sources/refresh'); toast('Sources refreshed'); loadSources(); }, e.target);
+
+// ===================================================================== domains
+async function loadDomains() {
+  const r = await api('/api/domains'); if (r.public_ip) $('#pubIp').textContent = r.public_ip;
+  const names = Object.fromEntries(appsCache.map(a => [a.id, a.name]));
+  $('#domList').innerHTML = r.domains.length ? `<table class="w-full text-sm"><thead><tr class="text-left text-slate-400 border-b border-ink-800"><th class="py-1">Address</th><th>Goes to</th><th>DNS</th><th></th></tr></thead><tbody>` +
+    r.domains.map(d => `<tr class="border-b border-ink-800"><td class="py-2"><a class="text-sky-300 hover:underline" href="https://${esc(d.domain)}/" target="_blank" rel="noopener">🔒 ${esc(d.domain)}</a>${d.tls === 'internal' ? ' <span class="pill bg-ink-700">local</span>' : ''}</td>
+      <td>${esc(d.target === 'panel' ? 'This panel' : (names[d.target] || d.target))} <span class="text-slate-500">:${d.port || '?'}</span></td>
+      <td>${d.dns_ok ? '<span class="text-green-400">✓ ready</span>' : `<span class="text-amber-300" title="Resolves to ${esc(d.resolves_to.join(', ') || 'nothing')}">⚠ ${d.resolves_to.length ? 'points to ' + esc(d.resolves_to.join(', ')) : (d.tls === 'internal' ? 'add it to your router DNS or hosts file' : 'not set up yet')}</span>`}</td>
+      <td class="text-right"><button class="btn btn-d !py-1" onclick="domDel(${jq(d.domain)})">Remove</button></td></tr>`).join('') + '</tbody></table>'
+    : '<p class="text-slate-500">No domains yet.</p>';
+  $('#domList').dataset.email = r.email || '';
+}
+function domainDialog(target) {
+  const inst = appsCache.filter(a => a.installed);
+  openModal('Add a domain with HTTPS', `<div class="space-y-3 text-sm">
+    <label class="block">Domain<input id="dName" class="inp mt-1" placeholder="chat.example.com"></label>
+    <label class="block">Goes to<select id="dTarget" class="inp mt-1"><option value="panel">This control panel</option>${inst.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('')}</select></label>
+    <label class="block">Certificate<select id="dTls" class="inp mt-1"><option value="auto">Public: free Let's Encrypt certificate (domain must point here, ports 80 and 443 open)</option><option value="internal">Local network only: the panel's own certificate</option></select></label>
+    <label class="block">Email for certificate notices (optional)<input id="dEmail" class="inp mt-1" value="${esc($('#domList').dataset.email || '')}" placeholder="you@example.com"></label>
+    <p class="text-xs text-slate-400">Before you click Add: create an <b>A record</b> for the domain pointing to <b>${esc($('#pubIp').textContent)}</b> at your DNS provider, and forward TCP ports <b>80 and 443</b> from your router to this server.</p>
+    <div class="flex justify-end gap-2"><button class="btn btn-g" onclick="closeModal()">Cancel</button><button id="dSave" class="btn btn-p">Add domain</button></div></div>`);
+  if (target) $('#dTarget').value = target;
+  $('#dSave').onclick = e => guard(async () => {
+    const r = await post('/api/domains', { domain: $('#dName').value.trim(), target: $('#dTarget').value, tls: $('#dTls').value, email: $('#dEmail').value.trim() });
+    closeModal(); toast(r.message); if (r.warning) toast(r.warning, 'err');
+    if (currentTab === 'settings') loadDomains(); else loadApps();
+  }, e.target);
+}
+async function domDel(d) { if (!confirm(`Remove ${d}?`)) return; await guard(async () => { const r = await api('/api/domains/' + encodeURIComponent(d), { method: 'DELETE' }); toast(r.message); loadDomains(); }); }
+$('#domAdd').onclick = () => domainDialog(null);
 function appMenu(id) {
   const a = appsCache.find(x => x.id === id);
   openModal(a.name, `<div class="space-y-3">
@@ -907,10 +1012,11 @@ function appMenu(id) {
       <button class="btn btn-g" onclick="appAction('${id}','restart');closeModal()">↻ Restart</button>
       <button class="btn btn-g" onclick="appLogs('${id}')">📜 Logs</button>
       <button class="btn btn-g" onclick="appSecrets('${id}')">🔑 Secrets</button>
-      <button class="btn btn-g" onclick="openAppFiles('${id}')">📁 Files</button>
+      ${isAdmin() ? `<button class="btn btn-g" onclick="openAppFiles('${id}')">📁 Files</button>
+      <button class="btn btn-g" onclick="domainDialog('${id}')">🌐 Domain + HTTPS</button>
       <button class="btn btn-g" onclick="installDialog('${id}')">⚙ Reconfigure</button>
       <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)}? Data is kept.')){appAction('${id}','uninstall');closeModal()}">Uninstall</button>
-      <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)} AND DELETE ALL ITS DATA? This cannot be undone.')){appAction('${id}','uninstall',true);closeModal()}">Uninstall + delete data</button>
+      <button class="btn btn-d" onclick="if(confirm('Uninstall ${esc(a.name)} AND DELETE ALL ITS DATA? This cannot be undone.')){appAction('${id}','uninstall',true);closeModal()}">Uninstall + delete data</button>` : ''}
     </div><pre id="appLog" class="log hidden"></pre><div id="appSec" class="text-sm font-mono"></div></div>`);
 }
 async function appLogs(id) { const l = await api(`/api/apps/${id}/logs`); $('#appLog').textContent = l.log || '(no output)'; $('#appLog').classList.remove('hidden'); $('#appLog').scrollTop = 1e9; }
@@ -1005,9 +1111,10 @@ $('#termReconnect').onclick = () => { term.x.clear(); connectTerm(); term.x.focu
 
 // ===================================================================== Settings
 async function loadSettings() {
-  const i = await api('/api/system/info').catch(() => null);
+  const i = isAdmin() ? await api('/api/system/info').catch(() => null) : null;
   if (i) { $('#sysInfo').innerHTML = `Panel v${esc(i.version)} · ${esc(i.os)}<br>${esc(i.ollama || 'Ollama not found')} · ${esc(i.docker || 'Docker not found')}`; $('#updUrl').value = i.update_url || ''; }
-  const r = await api('/api/apps').catch(() => ({ apps: [] }));
+  const r = await api('/api/apps').catch(() => ({ apps: [] })); appsCache = r.apps;
+  if (isAdmin()) { loadUsers(); loadSources(); loadDomains(); }
   $('#secApp').innerHTML = r.apps.filter(a => a.installed).map(a => `<option value="${a.id}">${esc(a.name)}</option>`).join('') || '<option value="">No apps installed</option>';
 }
 $('#secShow').onclick = async () => { const id = $('#secApp').value; if (!id) return; const s = await api(`/api/apps/${id}/secrets`); $('#secOut').innerHTML = Object.entries(s).map(([k, v]) => `<div><span class="text-slate-400">${esc(k)}</span> = <span class="select-all">${esc(v)}</span></div>`).join(''); };

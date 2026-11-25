@@ -42,6 +42,15 @@ Make **AI images** (ComfyUI, Fooocus, InvokeAI), **AI music and songs** (ACE-Ste
 ### 📁 A file manager for the whole server
 Browse every folder on the server and every app's data. Edit config files, upload by drag and drop, download whole folders as zip, preview photos, videos and PDFs, and fix permissions. There's no FTP or SSH to set up.
 
+### 🌐 1-click domains with automatic HTTPS
+Type `chat.example.com`, pick an app, click **Add**. The panel runs a Caddy proxy that gets a free Let's Encrypt certificate and renews it for you. That works for the panel itself or any app. Home-only names like `nas.lan` get their own local certificate.
+
+### 👥 Users and roles
+Give family, friends or your team their own login. **Admins** run everything. **Users** only see the apps you give them, for example just Open WebUI or just Jellyfin. They can open, start, stop, restart and update those apps, and nothing else: no terminal, no files, no installs.
+
+### 🛍️ Bring your own app store
+Add more app catalogs by URL, such as your own GitHub repo, a friend's list or a community catalog. Their apps appear next to the built-in ones, with a label showing where they came from.
+
 ### 📊 See everything, set up nothing
 Every GPU, drive, fan and network port is found on its own and shown live, with history charts. That includes temperature, power, VRAM, SMART drive health, SSD wear and dying-disk warnings.
 
@@ -69,6 +78,9 @@ You get a full shell with no SSH client. Update one app, every app, the AI engin
 | Ollama + llama.cpp model manager | ✅ | ⚠️ CLI | ❌ |
 | 1-click apps with GPU passthrough | ✅ 52 apps | ❌ | ✅ (no GPU choice) |
 | SMART, GPU, fan and network monitoring | ✅ | ⚠️ many tools | ⚠️ basic |
+| Domains + automatic HTTPS in one click | ✅ | ⚠️ proxy config by hand | ⚠️ some |
+| Users who can only control their own apps | ✅ | ❌ | ⚠️ some |
+| Add your own app store catalogs | ✅ | ❌ | ⚠️ some |
 | Runs on your existing Ubuntu, no new OS | ✅ | ✅ | ⚠️ some replace the OS |
 
 **Feedback wanted!** If you try it, please [share a hardware report](../../issues/new?template=hardware_report.yml), [report a bug](../../issues/new?template=bug_report.yml), [request an app](../../issues/new?template=app_request.yml) or star ⭐ the repo. Reports from mixed NVIDIA + AMD rigs and older cards (GTX 10xx, Tesla) help most. See [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -195,6 +207,40 @@ Notes:
 * Download any file, or a whole folder as a `.zip`. Rename, move, copy, create, delete, and change permissions and owner.
 * It runs as root, like the terminal. To stop accidents, it refuses to delete, move or zip top-level system folders such as `/`, `/etc`, `/usr` and `/opt/ai-panel`. You can still do that from the Terminal if you really mean it.
 * Prefer a separate file app with users, share links and video thumbnails? Install **FileBrowser Quantum** from the App Store. It shows all app data and shared media.
+
+## Users and roles (Settings > Users and roles)
+
+| | Admin | User |
+|---|:-:|:-:|
+| GPU & System, AI Models, Files, Terminal | ✅ | ❌ |
+| See apps | all | only the apps ticked for them |
+| Open, start, stop, restart, update, logs, secrets | ✅ | ✅ for their apps |
+| Install, reconfigure, uninstall apps, domains | ✅ | ❌ |
+| Users, updates, app sources | ✅ | ❌ |
+
+* Older installs keep working: the existing `admin` stays an admin.
+* You can't delete or demote the last admin, or yourself.
+* A user's task list only shows their own tasks.
+* Forgot the admin password? `sudo /opt/ai-panel/venv/bin/python /opt/ai-panel/app.py --set-password admin NEWPASSWORD && sudo systemctl restart ai-panel`
+
+## Domains and automatic HTTPS (Settings > Domains, or an app's ⋯ > Domain + HTTPS)
+
+1. At your DNS provider, add an **A record**: `chat.example.com` → your public IP. The panel shows your IP.
+2. On your router, forward TCP ports **80 and 443** to the server.
+3. Click **Add domain**, type it, and pick the panel or an app. The panel starts a **Caddy** container (`aipanel-proxy`, host network) that gets the Let's Encrypt certificate and renews it on its own.
+
+* The DNS column turns green ✓ when the domain points at this server.
+* **Local network only** makes a certificate from the panel's own CA, for names like `nas.lan` that only your router knows. Browsers warn once until you trust it.
+* Ports 80 and 443 must be free, so stop Nginx Proxy Manager or another web server first.
+* Behind CGNAT, or can't open ports? Use **Cloudflare Tunnel** from the App Store instead.
+* The Caddy config is at `/opt/ai-panel/proxy/Caddyfile`. The panel rewrites it, so change domains in the UI.
+
+## Extra app store sources (Settings > App store sources)
+
+* Paste a URL to any JSON file in the `apps_catalog.json` format (`{"apps": [...]}`). A plain GitHub repo link works if `apps_catalog.json` is at the top of the repo.
+* Apps with a bad id or an invalid compose file are skipped and counted. If an app id is already in the built-in catalog, the built-in app wins.
+* **Refresh all**, and **Settings > Refresh app catalog**, re-download every source.
+* Only add sources you trust: their apps run as Docker containers on your server.
 
 ## Getting models and apps in
 

@@ -31,6 +31,7 @@ import termios
 import threading
 import time
 import uuid
+import contextvars
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,7 +43,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 HOME = Path(os.environ.get("AIPANEL_HOME", "/opt/ai-panel"))
 CONFIG_FILE = HOME / "config.json"
 CATALOG_FILE = HOME / "apps_catalog.json"
@@ -166,6 +167,32 @@ def _rate_limited(ip: str) -> bool:
     return len(hist) >= 8
 
 
+def user_role(cfg: dict, user: str) -> str:
+    """Users without a roles entry are admins (keeps old single-admin installs working)."""
+    return (cfg.get("roles", {}).get(user) or {}).get("role", "admin")
+
+
+def user_apps(cfg: dict, user: str) -> set[str]:
+    return set((cfg.get("roles", {}).get(user) or {}).get("apps", []))
+
+
+CURRENT_USER: contextvars.ContextVar[str] = contextvars.ContextVar("CURRENT_USER", default="")
+USER_ROUTES = [
+    ("GET", re.compile(r"^/api/(me|apps|tasks|tasks/[0-9a-f]+)$"), None),
+    ("POST", re.compile(r"^/api/(logout|change-password)$"), None),
+    ("POST", re.compile(r"^/api/apps/([a-z0-9\-]+)/(start|stop|restart|update)$"), 1),
+    ("GET", re.compile(r"^/api/apps/([a-z0-9\-]+)/(logs|secrets)$"), 1),
+]
+
+
+def user_may(method: str, path: str, apps: set[str]) -> bool:
+    for m, rx, grp in USER_ROUTES:
+        mm = rx.match(path)
+        if m == method and mm:
+            return grp is None or mm.group(grp) in apps
+    return False
+
+
 # --------------------------------------------------------------------------------------
 # Background tasks (downloads, docker actions) with progress
 # --------------------------------------------------------------------------------------
@@ -176,7 +203,7 @@ def new_task(kind: str, title: str) -> dict:
     tid = uuid.uuid4().hex[:12]
     t = {"id": tid, "kind": kind, "title": title, "status": "running", "progress": None,
          "message": "Starting...", "log": [], "started": time.time(), "finished": None,
-         "total": None, "completed": None}
+         "total": None, "completed": None, "owner": CURRENT_USER.get()}
     TASKS[tid] = t
     # keep the list small
     if len(TASKS) > 200:
@@ -271,7 +298,13 @@ async def auth_middleware(request: Request, call_next):
     # CSRF defence: state-changing calls must come from our own page (custom header).
     if request.method not in ("GET", "HEAD") and request.headers.get("x-requested-with") != "aipanel":
         return JSONResponse({"detail": "Missing CSRF header"}, status_code=403)
+    cfg = load_config()
     request.state.user = user
+    request.state.role = user_role(cfg, user)
+    request.state.apps = user_apps(cfg, user)
+    if request.state.role != "admin" and not user_may(request.method, path, request.state.apps):
+        return JSONResponse({"detail": "Only an admin can do this"}, status_code=403)
+    CURRENT_USER.set(user)
     return await call_next(request)
 
 
@@ -321,7 +354,8 @@ async def logout(response: Response):
 
 @app.get("/api/me")
 async def me(request: Request):
-    return {"user": request.state.user, "version": VERSION, "hostname": socket.gethostname()}
+    return {"user": request.state.user, "role": request.state.role, "apps": sorted(request.state.apps),
+            "version": VERSION, "hostname": socket.gethostname()}
 
 
 class PasswordBody(BaseModel):
@@ -344,15 +378,18 @@ async def change_password(body: PasswordBody, request: Request, response: Respon
 
 
 @app.get("/api/tasks")
-async def list_tasks():
-    items = sorted(TASKS.values(), key=lambda x: x["started"], reverse=True)[:50]
+async def list_tasks(request: Request):
+    items = sorted(TASKS.values(), key=lambda x: x["started"], reverse=True)
+    if request.state.role != "admin":
+        items = [t for t in items if t.get("owner") == request.state.user]
+    items = items[:50]
     return [{k: v for k, v in t.items() if k != "log"} for t in items]
 
 
 @app.get("/api/tasks/{tid}")
-async def get_task(tid: str):
+async def get_task(tid: str, request: Request):
     t = TASKS.get(tid)
-    if not t:
+    if not t or (request.state.role != "admin" and t.get("owner") != request.state.user):
         raise HTTPException(404, "No such task")
     return t
 
@@ -1434,6 +1471,15 @@ def load_catalog() -> list[dict]:
         apps = json.loads(CATALOG_FILE.read_text()).get("apps", [])
     except Exception:
         pass
+    ids = {a["id"] for a in apps}
+    for src in load_config().get("catalog_sources", []):
+        try:
+            for a in json.loads((CATALOGS_DIR / f"{src['id']}.json").read_text()).get("apps", []):
+                if a.get("id") not in ids:
+                    ids.add(a["id"])
+                    apps.append({**a, "source": src.get("name", src["id"])})
+        except Exception:
+            continue
     try:
         for a in json.loads(CUSTOM_FILE.read_text()):
             a["custom"] = True
@@ -1494,7 +1540,7 @@ def app_states() -> dict[str, dict]:
 
 
 @app.get("/api/apps")
-async def list_apps():
+async def list_apps(request: Request):
     catalog = load_catalog()
     states = await asyncio.to_thread(app_states)
     seen = set()
@@ -1509,6 +1555,13 @@ async def list_apps():
         if d.name not in seen and (d / "app.json").exists():
             a = json.loads((d / "app.json").read_text())
             out.append(_app_view(a, True, states.get(d.name)))
+    doms = {}
+    for d in load_config().get("domains", []):
+        doms.setdefault(d["target"], d["domain"])
+    for a in out:
+        a["domain"] = doms.get(a["id"], "")
+    if request.state.role != "admin":
+        out = [a for a in out if a["installed"] and a["id"] in request.state.apps]
     return {"apps": out, "docker": docker_ok(), "gpu_vendors": sorted(gpu_vendors())}
 
 
@@ -1535,7 +1588,7 @@ def _app_view(a: dict, installed: bool, st: Optional[dict]) -> dict:
     return {"id": a["id"], "name": a.get("name", a["id"]), "description": a.get("description", ""),
             "category": a.get("category", "Other"), "icon": a.get("icon", ""), "port": port,
             "scheme": a.get("scheme", "http"), "path": a.get("path", "/"), "gpu": bool(a.get("gpu")),
-            "inputs": a.get("inputs", []), "notes": a.get("notes", ""), "custom": a.get("custom", False),
+            "inputs": a.get("inputs", []), "notes": a.get("notes", ""), "custom": a.get("custom", False), "source": a.get("source", ""),
             "website": a.get("website", ""), "installed": installed, "status": status, "gpu_pool": gpu_pool,
             "containers": (st or {}).get("containers", [])}
 
@@ -2014,7 +2067,8 @@ async def update_catalog():
         raise HTTPException(400, "Downloaded catalog is not valid")
     shutil.copy(CATALOG_FILE, CATALOG_FILE.with_suffix(".json.bak")) if CATALOG_FILE.exists() else None
     CATALOG_FILE.write_bytes(files["apps_catalog.json"])
-    return {"ok": True, "apps": len(data["apps"])}
+    srcs = await refresh_sources()
+    return {"ok": True, "apps": len(data["apps"]), "sources": len(srcs)}
 
 
 @app.post("/api/system/update-panel")
@@ -2051,6 +2105,371 @@ async def update_engines():
         task_done(t, rc == 0, "Engines updated" if rc == 0 else "Update failed")
     asyncio.create_task(run())
     return {"task": t["id"]}
+
+
+# --------------------------------------------------------------------------------------
+# Users and roles: admins run everything, users only see and control the apps they are given
+# --------------------------------------------------------------------------------------
+USER_RE = re.compile(r"^[a-z_][a-z0-9_.\-]{1,31}$")
+
+
+def _admins(cfg: dict) -> list[str]:
+    return [u for u in cfg["users"] if user_role(cfg, u) == "admin"]
+
+
+@app.get("/api/users")
+async def list_users():
+    cfg = load_config()
+    return [{"username": u, "role": user_role(cfg, u), "apps": sorted(user_apps(cfg, u))} for u in sorted(cfg["users"])]
+
+
+class UserBody(BaseModel):
+    username: str
+    password: str = ""
+    role: str = "user"
+    apps: list[str] = []
+
+
+@app.post("/api/users")
+async def save_user(body: UserBody, request: Request):
+    cfg = load_config()
+    u = body.username.strip().lower()
+    if not USER_RE.match(u):
+        raise HTTPException(400, "Username: 2-32 lowercase letters, numbers, dot, dash or underscore")
+    if body.role not in ("admin", "user"):
+        raise HTTPException(400, "Role must be admin or user")
+    new = u not in cfg["users"]
+    if new and len(body.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    if body.password and len(body.password) < 8:
+        raise HTTPException(400, "Password must be at least 8 characters")
+    if not new and body.role != "admin" and user_role(cfg, u) == "admin" and len(_admins(cfg)) <= 1:
+        raise HTTPException(400, "You can't remove the last admin")
+    if u == request.state.user and body.role != "admin":
+        raise HTTPException(400, "You can't take admin rights away from yourself")
+    bad = [a for a in body.apps if not APP_ID_RE.match(a)]
+    if bad:
+        raise HTTPException(400, "Bad app id: " + ", ".join(bad))
+    if body.password:
+        cfg["users"][u] = hash_password(body.password)
+    roles = cfg.setdefault("roles", {})
+    if body.role == "admin":
+        roles.pop(u, None)
+    else:
+        roles[u] = {"role": "user", "apps": sorted(set(body.apps))}
+    save_config(cfg)
+    return {"ok": True, "created": new}
+
+
+@app.delete("/api/users/{username}")
+async def delete_user(username: str, request: Request):
+    cfg = load_config()
+    if username not in cfg["users"]:
+        raise HTTPException(404, "No such user")
+    if username == request.state.user:
+        raise HTTPException(400, "You can't delete yourself")
+    if user_role(cfg, username) == "admin" and len(_admins(cfg)) <= 1:
+        raise HTTPException(400, "You can't delete the last admin")
+    cfg["users"].pop(username)
+    cfg.get("roles", {}).pop(username, None)
+    save_config(cfg)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------------------
+# Extra app store sources: add any catalog JSON by URL (your own repo, a friend's, a community list)
+# --------------------------------------------------------------------------------------
+CATALOGS_DIR = HOME / "catalogs"
+
+
+def _raw_github(url: str) -> str:
+    m = re.match(r"^https://github\.com/([^/]+)/([^/]+)/blob/(.+)$", url)
+    if m:
+        return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/{m.group(3)}"
+    m = re.match(r"^https://github\.com/([^/]+)/([^/]+?)/?$", url)
+    if m:  # bare repo link: assume apps_catalog.json on the default branch
+        return f"https://raw.githubusercontent.com/{m.group(1)}/{m.group(2)}/HEAD/apps_catalog.json"
+    return url
+
+
+async def _fetch_source(url: str) -> tuple[list[dict], int]:
+    """Download a catalog, keep only apps that look valid. Returns (apps, skipped)."""
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+        r = await c.get(_raw_github(url))
+    if r.status_code != 200:
+        raise HTTPException(502, f"HTTP {r.status_code} from {url}")
+    if len(r.content) > 5_000_000:
+        raise HTTPException(400, "Catalog is bigger than 5MB")
+    try:
+        data = r.json()
+    except Exception:
+        raise HTTPException(400, "That URL is not a JSON app catalog")
+    items = data.get("apps") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise HTTPException(400, 'Catalog JSON must be {"apps": [...]} or a list of apps')
+    good, skipped = [], 0
+    for a in items:
+        try:
+            assert isinstance(a, dict) and APP_ID_RE.match(str(a.get("id", "")))
+            comp = yaml.safe_load(a["compose"])
+            assert isinstance(comp, dict) and isinstance(comp.get("services"), dict)
+            a = {k: v for k, v in a.items() if k not in ("custom", "source")}
+            good.append(a)
+        except Exception:
+            skipped += 1
+    if not good:
+        raise HTTPException(400, "No valid apps found in that catalog")
+    return good, skipped
+
+
+class SourceBody(BaseModel):
+    url: str
+    name: str = ""
+
+
+@app.get("/api/catalog-sources")
+async def list_sources():
+    return load_config().get("catalog_sources", [])
+
+
+@app.post("/api/catalog-sources")
+async def add_source(body: SourceBody):
+    url = body.url.strip()
+    if not re.match(r"^https://[^\s]+$", url):
+        raise HTTPException(400, "Enter an https:// URL")
+    cfg = load_config()
+    srcs = cfg.setdefault("catalog_sources", [])
+    if any(s["url"] == url for s in srcs):
+        raise HTTPException(400, "That source is already added")
+    apps, skipped = await _fetch_source(url)
+    sid = re.sub(r"[^a-z0-9]+", "-", (body.name or url.split("//", 1)[-1]).lower()).strip("-")[:30] or "source"
+    while any(s["id"] == sid for s in srcs):
+        sid += "-2"
+    CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
+    (CATALOGS_DIR / f"{sid}.json").write_text(json.dumps({"apps": apps}))
+    src = {"id": sid, "name": (body.name or (url.split("/")[3] if url.count("/") > 3 else url))[:40], "url": url,
+           "apps": len(apps), "skipped": skipped, "updated": int(time.time()), "error": ""}
+    srcs.append(src)
+    save_config(cfg)
+    return src
+
+
+async def refresh_sources() -> list[dict]:
+    cfg = load_config()
+    for s in cfg.get("catalog_sources", []):
+        try:
+            apps, skipped = await _fetch_source(s["url"])
+            CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
+            (CATALOGS_DIR / f"{s['id']}.json").write_text(json.dumps({"apps": apps}))
+            s.update(apps=len(apps), skipped=skipped, updated=int(time.time()), error="")
+        except HTTPException as e:
+            s["error"] = str(e.detail)
+        except Exception as e:
+            s["error"] = str(e)
+    save_config(cfg)
+    return cfg.get("catalog_sources", [])
+
+
+@app.post("/api/catalog-sources/refresh")
+async def refresh_sources_api():
+    return await refresh_sources()
+
+
+@app.delete("/api/catalog-sources/{sid}")
+async def delete_source(sid: str):
+    cfg = load_config()
+    cfg["catalog_sources"] = [s for s in cfg.get("catalog_sources", []) if s["id"] != sid]
+    save_config(cfg)
+    if re.match(r"^[a-z0-9\-]+$", sid):
+        (CATALOGS_DIR / f"{sid}.json").unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------------------
+# 1-click domains with automatic HTTPS (Caddy + Let's Encrypt), for the panel and any app
+# --------------------------------------------------------------------------------------
+PROXY_DIR = HOME / "proxy"
+DOMAIN_RE = re.compile(r"^(?=.{4,253}$)([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9\-]{1,62}$")
+PROXY_COMPOSE = """services:
+  caddy:
+    image: caddy:2
+    container_name: aipanel-proxy
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data:/data
+      - ./config:/config
+"""
+
+
+def _proxy_cmd() -> list[str]:
+    return ["docker", "compose", "-p", "aipanel-proxy", "-f", str(PROXY_DIR / "docker-compose.yml")]
+
+
+def _target_port(target: str) -> tuple[Optional[int], str]:
+    if target == "panel":
+        return PORT, "http"
+    env_file = APPS_DIR / target / ".env"
+    if not env_file.exists():
+        return None, "http"
+    port = parse_env(env_file.read_text()).get("APP_PORT")
+    scheme = "http"
+    try:
+        scheme = get_app(target).get("scheme", "http")
+        port = port or get_app(target).get("port")
+    except HTTPException:
+        pass
+    return (int(port) if port else None), scheme
+
+
+def render_caddyfile(cfg: dict) -> str:
+    email = cfg.get("acme_email", "")
+    out = ["# Written by AI Panel. Edit domains in the web UI, not here.", "{"]
+    if email:
+        out.append(f"\temail {email}")
+    out += ["}", ""]
+    for d in cfg.get("domains", []):
+        port, scheme = _target_port(d["target"])
+        if not port:
+            out.append(f"# {d['domain']}: {d['target']} is not installed, skipped\n")
+            continue
+        out.append(f"{d['domain']} {{")
+        if d.get("tls") == "internal":
+            out.append("\ttls internal")
+        out.append("\tencode zstd gzip")
+        if scheme == "https":
+            out += [f"\treverse_proxy https://127.0.0.1:{port} {{", "\t\ttransport http {", "\t\t\ttls_insecure_skip_verify", "\t\t}", "\t}"]
+        else:
+            out.append(f"\treverse_proxy 127.0.0.1:{port}")
+        out += ["}", ""]
+    return "\n".join(out)
+
+
+def _proxy_running() -> bool:
+    rc, out = run_quick(["docker", "inspect", "-f", "{{.State.Running}}", "aipanel-proxy"], timeout=10)
+    return rc == 0 and out.strip() == "true"
+
+
+async def apply_proxy(cfg: dict) -> str:
+    PROXY_DIR.mkdir(parents=True, exist_ok=True)
+    (PROXY_DIR / "docker-compose.yml").write_text(PROXY_COMPOSE)
+    cf = PROXY_DIR / "Caddyfile"
+    old = cf.read_text() if cf.exists() else None
+    if not cfg.get("domains"):
+        cf.write_text(render_caddyfile(cfg))
+        if await asyncio.to_thread(_proxy_running):
+            run_quick(_proxy_cmd() + ["down"], timeout=60)
+        return "No domains left, so the HTTPS proxy was stopped"
+    if not docker_ok():
+        raise HTTPException(400, "Docker is needed for domains. Re-run install_app.sh.")
+    running = await asyncio.to_thread(_proxy_running)
+    if not running:
+        busy = [p for p in (80, 443) if not port_free(p)]
+        if busy:
+            raise HTTPException(400, f"Port {' and '.join(map(str, busy))} is already used by something else "
+                                     "(for example Nginx Proxy Manager or another web server). Stop it first.")
+    with open(cf, "w") as f:  # rewrite in place: the container bind-mounts this exact file
+        f.write(render_caddyfile(cfg))
+    if not running:
+        rc, out = run_quick(_proxy_cmd() + ["up", "-d"], timeout=300)
+        if rc != 0:
+            raise HTTPException(500, "Could not start the HTTPS proxy: " + out[-400:])
+        return "HTTPS proxy started"
+    rc, out = run_quick(["docker", "exec", "aipanel-proxy", "caddy", "reload", "--config", "/etc/caddy/Caddyfile",
+                         "--adapter", "caddyfile"], timeout=60)
+    if rc != 0:
+        if old is not None:
+            with open(cf, "w") as f:
+                f.write(old)
+        raise HTTPException(400, "The proxy rejected the new settings: " + out[-400:])
+    return "HTTPS proxy reloaded"
+
+
+_ip_cache: dict = {"t": 0, "ip": None}
+
+
+async def public_ip() -> Optional[str]:
+    if time.time() - _ip_cache["t"] < 600:
+        return _ip_cache["ip"]
+    ip = None
+    for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(url)
+            if r.status_code == 200 and re.match(r"^[0-9a-f.:]+$", r.text.strip()):
+                ip = r.text.strip()
+                break
+        except Exception:
+            continue
+    _ip_cache.update(t=time.time(), ip=ip)
+    return ip
+
+
+def _resolve(domain: str) -> list[str]:
+    try:
+        return sorted({i[4][0] for i in socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)})
+    except Exception:
+        return []
+
+
+@app.get("/api/domains")
+async def list_domains():
+    cfg = load_config()
+    pip = await public_ip()
+    out = []
+    for d in cfg.get("domains", []):
+        ips = await asyncio.to_thread(_resolve, d["domain"])
+        port, _ = _target_port(d["target"])
+        out.append({**d, "port": port, "resolves_to": ips, "dns_ok": bool(pip and pip in ips) if d.get("tls") != "internal" else bool(ips)})
+    return {"domains": out, "email": cfg.get("acme_email", ""), "public_ip": pip,
+            "proxy_running": await asyncio.to_thread(_proxy_running) if docker_ok() else False}
+
+
+class DomainBody(BaseModel):
+    domain: str
+    target: str
+    email: str = ""
+    tls: str = "auto"
+
+
+@app.post("/api/domains")
+async def add_domain(body: DomainBody):
+    dom = body.domain.strip().lower().rstrip(".")
+    if dom.startswith(("http://", "https://")):
+        dom = dom.split("://", 1)[1].split("/")[0]
+    if not DOMAIN_RE.match(dom):
+        raise HTTPException(400, "Enter a domain like app.example.com")
+    if body.target != "panel" and not (APP_ID_RE.match(body.target) and (APPS_DIR / body.target / ".env").exists()):
+        raise HTTPException(400, "Pick the panel or an installed app")
+    if body.tls not in ("auto", "internal"):
+        raise HTTPException(400, "tls must be auto or internal")
+    cfg = load_config()
+    if body.email:
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", body.email):
+            raise HTTPException(400, "Email address doesn't look right")
+        cfg["acme_email"] = body.email.strip()
+    doms = [d for d in cfg.get("domains", []) if d["domain"] != dom]
+    doms.append({"domain": dom, "target": body.target, "tls": body.tls, "added": int(time.time())})
+    cfg["domains"] = doms
+    msg = await apply_proxy(cfg)
+    save_config(cfg)
+    ips = await asyncio.to_thread(_resolve, dom)
+    pip = await public_ip()
+    warn = ""
+    if body.tls == "auto" and pip and pip not in ips:
+        warn = (f"DNS for {dom} points to {', '.join(ips) or 'nothing'}, not this server's public IP {pip}. "
+                "Add an A record, and forward ports 80 and 443 on your router. The certificate is issued as soon as both work.")
+    return {"ok": True, "message": msg, "warning": warn, "url": f"https://{dom}/"}
+
+
+@app.delete("/api/domains/{domain}")
+async def delete_domain(domain: str):
+    cfg = load_config()
+    cfg["domains"] = [d for d in cfg.get("domains", []) if d["domain"] != domain]
+    msg = await apply_proxy(cfg)
+    save_config(cfg)
+    return {"ok": True, "message": msg}
 
 
 # --------------------------------------------------------------------------------------
@@ -2418,7 +2837,7 @@ async def terminal(ws: WebSocket):
     user = check_token(ws.cookies.get(COOKIE))
     origin = ws.headers.get("origin", "")
     host = ws.headers.get("host", "")
-    if not user or (origin and origin.split("://", 1)[-1] != host):
+    if not user or (origin and origin.split("://", 1)[-1] != host) or user_role(load_config(), user) != "admin":
         await ws.close(code=4401)
         return
     await ws.accept()
